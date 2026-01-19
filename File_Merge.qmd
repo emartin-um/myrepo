@@ -1,0 +1,475 @@
+---
+title: "MergeFiles"
+format:
+  html:
+    toc: true
+    toc-float: true
+    toc-depth: 3
+editor: visual
+---
+
+# Overview  
+
+Merge post-QC NPQ file(s) with meta_data
+
+
+## Load Libraries and Data
+
+```{r}
+#| label: setup
+#| message: false
+#| echo: false
+
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+
+# Read metadata file
+metadata <- read_csv("input_files/U19_Alamar_metadata_2026Jan16.csv")
+
+# Rename APOE in metadata to APOE.geno and create Group_Race_Ethnicity
+metadata <- metadata %>%
+  rename(APOE.geno = APOE) %>%
+  mutate(Group_Race_Ethnicity = paste(Group, Race, Ethnicity, sep = "_"))
+
+# Read post-QC biomarker files
+biomarkers_postQC <- read_csv("input_files/NPQ_20251220_post_QC.csv")
+biomarkers_low_postQC <- read_csv("input_files/NPQ_20251220_Low_post_QC.csv")
+
+# Clean up biomarker column names - remove hyphens and special characters
+biomarkers_postQC <- biomarkers_postQC %>%
+  rename_with(~str_replace_all(., "[^A-Za-z0-9_]", "_"))
+
+biomarkers_low_postQC <- biomarkers_low_postQC %>%
+  rename_with(~str_replace_all(., "[^A-Za-z0-9_]", "_"))
+```
+
+## Merge Metadata with Standard Post-QC Biomarkers
+
+```{r}
+#| label: merge-standard
+#| echo: false
+
+# Identify common columns to avoid redundancy
+common_cols <- intersect(names(metadata), names(biomarkers_postQC))
+cat("Common columns between metadata and post-QC file:", paste(common_cols, collapse=", "), "\n")
+
+# Merge metadata with post-QC biomarkers - only keep samples in both files
+# Join on SAMPLE_ALIQUOT (metadata) = SampleID (biomarkers)
+merged_standard <- metadata %>%
+  inner_join(biomarkers_postQC,
+            by = c("SAMPLE_ALIQUOT" = "SampleID"),
+            suffix = c("_meta", "_bio")) %>%
+  select(-any_of(c("Run", "Bay"))) # Remove redundant Run and Bay columns from biomarker file
+
+cat("\nMerged standard post-QC file dimensions:", nrow(merged_standard), "rows x", ncol(merged_standard), "columns\n")
+cat("(Only samples present in both files are included)\n")
+```
+
+## Merge Metadata with Low Post-QC Biomarkers
+
+```{r}
+#| label: merge-low
+#| echo: false
+
+# Identify common columns
+common_cols_low <- intersect(names(metadata), names(biomarkers_low_postQC))
+cat("Common columns between metadata and Low post-QC file:", paste(common_cols_low, collapse=", "), "\n")
+
+# Merge metadata with Low post-QC biomarkers - only keep samples in both files
+# Join on SAMPLE_ALIQUOT (metadata) = SampleID (biomarkers)
+merged_low <- metadata %>%
+  inner_join(biomarkers_low_postQC,
+            by = c("SAMPLE_ALIQUOT" = "SampleID"),
+            suffix = c("_meta", "_bio")) %>%
+  select(-any_of(c("Run", "Bay"))) # Remove redundant Run and Bay columns from biomarker file
+
+cat("\nMerged Low post-QC file dimensions:", nrow(merged_low), "rows x", ncol(merged_low), "columns\n")
+cat("(Only samples present in both files are included)\n")
+```
+
+# Check for Non-Unique Samples
+
+```{r}
+#| label: check-duplicates
+#| echo: false
+#| results: asis
+
+# Check for duplicate SAMPLE (not SAMPLE_ALIQUOT) in metadata
+dup_samples_meta <- metadata %>%
+  count(SAMPLE) %>%
+  filter(n > 1) %>%
+  arrange(desc(n))
+
+if (nrow(dup_samples_meta) > 0) {
+  cat("=== NON-UNIQUE SAMPLES IN METADATA ===\n")
+  cat("Found", nrow(dup_samples_meta), "SAMPLEs with multiple aliquots/runs:\n\n")
+  print(kable(dup_samples_meta, col.names = c("SAMPLE", "Count")) %>%
+          kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+
+  # Show details of duplicates
+  cat("\n\nDetails of duplicate samples (showing SAMPLE_ALIQUOT, RUN, etc.):\n")
+  dup_details <- metadata %>%
+    filter(SAMPLE %in% dup_samples_meta$SAMPLE) %>%
+    arrange(SAMPLE, RUN) %>%
+    select(SAMPLE, SAMPLE_ALIQUOT, RUN, Record_ID, Group, CDX, age_at_subject, APOE.geno)
+
+  print(kable(dup_details) %>%
+          kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+} else {
+  cat("No duplicate SAMPLEs found in metadata.\n")
+}
+
+# Check for duplicate SAMPLE_ALIQUOT in metadata
+dup_aliquots_meta <- metadata %>%
+  count(SAMPLE_ALIQUOT) %>%
+  filter(n > 1) %>%
+  arrange(desc(n))
+
+if (nrow(dup_aliquots_meta) > 0) {
+  cat("\n\n=== NON-UNIQUE SAMPLE_ALIQUOTs IN METADATA ===\n")
+  cat("Found", nrow(dup_aliquots_meta), "SAMPLE_ALIQUOTs with multiple entries:\n\n")
+  print(kable(dup_aliquots_meta, col.names = c("SAMPLE_ALIQUOT", "Count")) %>%
+          kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+} else {
+  cat("\n\nNo duplicate SAMPLE_ALIQUOTs found in metadata (all aliquots are unique).\n")
+}
+
+# Check for duplicate SampleID in biomarkers
+dup_samples_bio <- biomarkers_postQC %>%
+  count(SampleID) %>%
+  filter(n > 1)
+
+if (nrow(dup_samples_bio) > 0) {
+  cat("\n\n=== NON-UNIQUE SAMPLES IN BIOMARKERS (POST-QC) ===\n")
+  cat("Found", nrow(dup_samples_bio), "SampleIDs with multiple entries:\n\n")
+  print(kable(dup_samples_bio, col.names = c("SampleID", "Count")) %>%
+          kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+} else {
+  cat("\n\nNo duplicate SampleIDs found in post-QC biomarkers.\n")
+}
+```
+
+# Details
+## File Summaries
+
+```{r}
+#| label: file-summaries
+#| echo: false
+
+cat("=== METADATA FILE SUMMARY ===\n")
+cat("Dimensions:", nrow(metadata), "rows x", ncol(metadata), "columns\n")
+cat("Columns:", paste(names(metadata), collapse=", "), "\n\n")
+
+cat("=== STANDARD POST-QC BIOMARKERS FILE SUMMARY ===\n")
+cat("Dimensions:", nrow(biomarkers_postQC), "rows x", ncol(biomarkers_postQC), "columns\n")
+cat("Number of biomarker columns:", ncol(biomarkers_postQC) - 3, "\n") # Excluding ID columns
+cat("Sample ID columns:", paste(names(biomarkers_postQC)[1:3], collapse=", "), "\n\n")
+
+cat("=== LOW POST-QC BIOMARKERS FILE SUMMARY ===\n")
+cat("Dimensions:", nrow(biomarkers_low_postQC), "rows x", ncol(biomarkers_low_postQC), "columns\n")
+cat("Number of biomarker columns:", ncol(biomarkers_low_postQC) - 3, "\n") # Excluding ID columns
+cat("Sample ID columns:", paste(names(biomarkers_low_postQC)[1:3], collapse=", "), "\n\n")
+
+cat("=== MERGED STANDARD FILE SUMMARY ===\n")
+cat("Dimensions:", nrow(merged_standard), "rows x", ncol(merged_standard), "columns\n")
+cat("Metadata columns:", ncol(metadata), "\n")
+cat("Biomarker columns added:", ncol(merged_standard) - ncol(metadata), "\n\n")
+
+cat("=== MERGED LOW FILE SUMMARY ===\n")
+cat("Dimensions:", nrow(merged_low), "rows x", ncol(merged_low), "columns\n")
+cat("Metadata columns:", ncol(metadata), "\n")
+cat("Biomarker columns added:", ncol(merged_low) - ncol(metadata), "\n")
+```
+
+## Write Merged Files
+
+```{r}
+#| label: write-merged-files
+#| echo: false
+
+# Create output directory if it doesn't exist
+if (!dir.exists("output_files")) {
+  dir.create("output_files")
+}
+
+# Write merged files
+write_csv(merged_standard, "output_files/merged_standard_post_QC.csv")
+write_csv(merged_low, "output_files/merged_low_post_QC.csv")
+
+cat("Merged files written to output_files/\n")
+cat("  - merged_standard_post_QC.csv (", nrow(merged_standard), "rows ×", ncol(merged_standard), "columns)\n")
+cat("  - merged_low_post_QC.csv (", nrow(merged_low), "rows ×", ncol(merged_low), "columns)\n")
+```
+
+## Helper Functions for Rare Level Handling
+
+```{r}
+#| label: helper-functions
+#| echo: false
+
+# Function to collapse rare levels in a categorical variable
+collapse_rare_levels <- function(x, min_count = 5, other_label = "Other") {
+  counts <- table(x, useNA = "no")
+  rare_levels <- names(counts[counts < min_count])
+
+  x_collapsed <- as.character(x)
+  x_collapsed[x_collapsed %in% rare_levels] <- other_label
+
+  return(factor(x_collapsed))
+}
+
+# Function to get frequency table with option to collapse rare levels
+get_freq_table <- function(data, var_name, min_count = NULL, collapse = FALSE) {
+  var_data <- data[[var_name]]
+
+  if (collapse && !is.null(min_count)) {
+    var_data <- collapse_rare_levels(var_data, min_count = min_count)
+  }
+
+  freq_table <- table(var_data, useNA = "ifany")
+  prop_table <- prop.table(freq_table) * 100
+
+  result <- data.frame(
+    Level = names(freq_table),
+    Count = as.numeric(freq_table),
+    Percent = round(as.numeric(prop_table), 1)
+  )
+
+  # Add indicator for rare levels if not collapsed
+  if (!collapse && !is.null(min_count)) {
+    result$Rare <- ifelse(result$Count < min_count, "*", "")
+  }
+
+  return(result)
+}
+
+# Function to summarize all categorical variables
+summarize_categorical <- function(data, vars, min_count = 5, collapse_rare = FALSE) {
+  summaries <- list()
+
+  for (var in vars) {
+    cat("\n### ", var, "\n")
+    freq_tab <- get_freq_table(data, var, min_count = min_count, collapse = collapse_rare)
+    print(kable(freq_tab, caption = var) %>%
+            kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+    cat("\n")
+  }
+}
+
+cat("Helper functions loaded.\n")
+cat("  - collapse_rare_levels(): Collapse levels with < n observations\n")
+cat("  - get_freq_table(): Get frequency table with optional rare level handling\n")
+cat("  - summarize_categorical(): Summarize multiple categorical variables\n")
+```
+
+# Metadata Summaries 
+
+## Metadata Column Summary Table
+
+```{r}
+#| label: metadata-table-summary
+#| echo: false
+
+# Create summary statistics for metadata columns
+metadata_summary <- metadata %>%
+  summarise(
+    Total_Samples = n(),
+    Unique_Samples = n_distinct(SAMPLE),
+    Unique_Runs = n_distinct(RUN),
+    .groups = "drop"
+  )
+
+# Categorical variables summary
+categorical_summary <- metadata %>%
+  summarise(
+    Groups = paste(unique(Group), collapse=", "),
+    Case_Control = paste(table(Case_Control), ":", names(table(Case_Control)), collapse="; "),
+    Sex = paste(table(sex), ":", names(table(sex)), collapse="; "),
+    CDX = paste(unique(CDX), collapse=", "),
+    APOE_variants = n_distinct(APOE.geno)
+  )
+
+# Numeric variables summary
+numeric_summary <- metadata %>%
+  summarise(
+    Age_mean = round(mean(age_at_subject, na.rm=TRUE), 1),
+    Age_SD = round(sd(age_at_subject, na.rm=TRUE), 1),
+    Age_range = paste(round(min(age_at_subject, na.rm=TRUE), 1), "-",
+                     round(max(age_at_subject, na.rm=TRUE), 1)),
+    BMI_mean = round(mean(BMI, na.rm=TRUE), 1),
+    BMI_SD = round(sd(BMI, na.rm=TRUE), 1)
+  )
+
+# Combine and display
+cat("=== METADATA OVERVIEW ===\n\n")
+
+kable(metadata_summary, caption="Sample Counts") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+kable(categorical_summary, caption="Categorical Variables") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+kable(numeric_summary, caption="Numeric Variables") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Detailed Metadata Summaries
+
+### Categorical Variables (with rare level indicators)
+
+```{r}
+#| label: detailed-categorical
+#| echo: false
+#| results: asis
+
+# Set minimum count threshold for rare levels
+MIN_COUNT <- 5
+
+# Define categorical variables to summarize
+categorical_vars <- c("Group", "Ethnicity", "Race", "sex", "CDX",
+                      "Case_Control", "APOE.geno", "Site", "Country/State",
+                      "country_of_birth", "Group_Race_Ethnicity")
+
+cat("Note: Levels marked with * have fewer than", MIN_COUNT, "observations\n\n")
+
+# Summarize each categorical variable
+for (var in categorical_vars) {
+  if (var %in% names(metadata)) {
+    cat("\n#### ", var, "\n\n")
+    freq_tab <- get_freq_table(metadata, var, min_count = MIN_COUNT, collapse = FALSE)
+
+    # Sort by count descending
+    freq_tab <- freq_tab %>% arrange(desc(Count))
+
+    print(kable(freq_tab, caption = paste0(var, " Distribution")) %>%
+            kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                         full_width = FALSE))
+    cat("\n")
+  }
+}
+```
+
+### Numeric Variables
+
+```{r}
+#| label: detailed-numeric
+#| echo: false
+
+numeric_vars <- c("age_at_subject", "AOO", "Years_Onset", "height_inches",
+                  "weight_lb", "BMI")
+
+numeric_summary_detailed <- metadata %>%
+  select(all_of(numeric_vars)) %>%
+  summarise(across(everything(),
+                   list(n = ~sum(!is.na(.)),
+                        missing = ~sum(is.na(.)),
+                        mean = ~mean(., na.rm = TRUE),
+                        sd = ~sd(., na.rm = TRUE),
+                        min = ~min(., na.rm = TRUE),
+                        q25 = ~quantile(., 0.25, na.rm = TRUE),
+                        median = ~median(., na.rm = TRUE),
+                        q75 = ~quantile(., 0.75, na.rm = TRUE),
+                        max = ~max(., na.rm = TRUE)),
+                   .names = "{.col}_{.fn}")) %>%
+  pivot_longer(everything(),
+               names_to = c("Variable", "Statistic"),
+               names_pattern = "(.+)_(.+)",
+               values_to = "Value") %>%
+  pivot_wider(names_from = Statistic, values_from = Value) %>%
+  mutate(across(c(mean, sd, min, q25, median, q75, max), ~round(., 2)))
+
+kable(numeric_summary_detailed,
+      caption = "Numeric Variables: Detailed Summary Statistics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+### Numeric Variables - Range Check for Implausible Values
+
+```{r}
+#| label: numeric-ranges
+#| echo: false
+#| results: asis
+
+cat("=== NUMERIC VARIABLE RANGES (Check for Implausible Values) ===\n\n")
+
+# Define plausible ranges for each variable
+plausible_ranges <- list(
+  age_at_subject = c(40, 120),
+  AOO = c(30, 120),
+  Years_Onset = c(0, 70),
+  height_inches = c(36, 96),  # ~3 feet to 8 feet
+  weight_lb = c(50, 500),
+  BMI = c(10, 70)
+)
+
+# Check each numeric variable
+for (var in numeric_vars) {
+  if (var %in% names(metadata)) {
+    var_data <- metadata[[var]]
+    var_range <- range(var_data, na.rm = TRUE)
+    n_missing <- sum(is.na(var_data))
+
+    cat("\n#### ", var, "\n\n", sep = "")
+    cat("- **Observed range:** [", var_range[1], ", ", var_range[2], "]\n", sep = "")
+    cat("- **Expected range:** [", plausible_ranges[[var]][1], ", ", plausible_ranges[[var]][2], "]\n", sep = "")
+    cat("- **Missing values:** ", n_missing, " (", round(n_missing/length(var_data)*100, 1), "%)\n", sep = "")
+
+    # Check for values outside plausible range
+    outliers <- var_data[!is.na(var_data) &
+                         (var_data < plausible_ranges[[var]][1] |
+                          var_data > plausible_ranges[[var]][2])]
+
+    if (length(outliers) > 0) {
+      cat("- **⚠️ WARNING:** ", length(outliers), " values outside plausible range\n", sep = "")
+      cat("- **Outlier values:** ", paste(sort(unique(outliers)), collapse = ", "), "\n\n", sep = "")
+
+      # Show samples with outliers
+      outlier_samples <- metadata %>%
+        filter(!is.na(.data[[var]]) &
+               (.data[[var]] < plausible_ranges[[var]][1] |
+                .data[[var]] > plausible_ranges[[var]][2])) %>%
+        select(SAMPLE_ALIQUOT, SAMPLE, all_of(var), Group, age_at_subject, sex)
+
+      cat("**Samples with outlier values:**\n\n")
+      print(kable(outlier_samples, row.names = FALSE) %>%
+              kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                           full_width = FALSE,
+                           position = "left"))
+      cat("\n\n")
+    } else {
+      cat("- ✓ All values within plausible range\n\n")
+    }
+  }
+}
+```
+
+### Collapsed Rare Levels Version
+
+```{r}
+#| label: collapsed-categorical
+#| echo: false
+#| results: asis
+
+cat("\n## Categorical Variables with Rare Levels Collapsed\n\n")
+cat("Levels with fewer than", MIN_COUNT, "observations collapsed into 'Other'\n\n")
+
+# Variables that might benefit from collapsing rare levels
+vars_to_collapse <- c("Ethnicity", "Race", "Country/State", "country_of_birth", "Site", "Group_Race_Ethnicity")
+
+for (var in vars_to_collapse) {
+  if (var %in% names(metadata)) {
+    cat("\n#### ", var, " (collapsed)\n\n")
+    freq_tab <- get_freq_table(metadata, var, min_count = MIN_COUNT, collapse = TRUE)
+
+    # Sort by count descending
+    freq_tab <- freq_tab %>% arrange(desc(Count))
+
+    print(kable(freq_tab, caption = paste0(var, " Distribution (Rare Levels Collapsed)")) %>%
+            kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                         full_width = FALSE))
+    cat("\n")
+  }
+}
+```
+
