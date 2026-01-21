@@ -1,5 +1,5 @@
 ---
-title: "MergeFiles"
+title: "Merge Post-QC NPQ Files with Metadata"
 format:
   html:
     toc: true
@@ -8,10 +8,13 @@ format:
 editor: visual
 ---
 
-# Overview  
+# Overview
 
-Merge post-QC NPQ file(s) with meta_data
+Merge post-QC NPQ file(s) with meta_data.
 
+Generates report of duplicate samples and those with implausible covariate data for potential exclusion.
+
+SEEMS LIKE I MAY HAVE FEWER AFDC SAMPLES MERGING IN HERE THAN BEFORE. CHECK
 
 ## Load Libraries and Data
 
@@ -88,69 +91,46 @@ cat("\nMerged Low post-QC file dimensions:", nrow(merged_low), "rows x", ncol(me
 cat("(Only samples present in both files are included)\n")
 ```
 
-# Check for Non-Unique Samples
+## Merge Post-QC and Low Post-QC Biomarkers (Combined)
 
 ```{r}
-#| label: check-duplicates
+#| label: merge-combined
 #| echo: false
-#| results: asis
 
-# Check for duplicate SAMPLE (not SAMPLE_ALIQUOT) in metadata
-dup_samples_meta <- metadata %>%
-  count(SAMPLE) %>%
-  filter(n > 1) %>%
-  arrange(desc(n))
+# Identify which biomarker columns are unique to each file
+biomarker_cols_standard <- setdiff(names(biomarkers_postQC), c("SampleID", "Run", "Bay"))
+biomarker_cols_low <- setdiff(names(biomarkers_low_postQC), c("SampleID", "Run", "Bay"))
 
-if (nrow(dup_samples_meta) > 0) {
-  cat("=== NON-UNIQUE SAMPLES IN METADATA ===\n")
-  cat("Found", nrow(dup_samples_meta), "SAMPLEs with multiple aliquots/runs:\n\n")
-  print(kable(dup_samples_meta, col.names = c("SAMPLE", "Count")) %>%
-          kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+# Get overlapping and unique biomarkers
+overlap_biomarkers <- intersect(biomarker_cols_standard, biomarker_cols_low)
+unique_to_standard <- setdiff(biomarker_cols_standard, biomarker_cols_low)
+unique_to_low <- setdiff(biomarker_cols_low, biomarker_cols_standard)
 
-  # Show details of duplicates
-  cat("\n\nDetails of duplicate samples (showing SAMPLE_ALIQUOT, RUN, etc.):\n")
-  dup_details <- metadata %>%
-    filter(SAMPLE %in% dup_samples_meta$SAMPLE) %>%
-    arrange(SAMPLE, RUN) %>%
-    select(SAMPLE, SAMPLE_ALIQUOT, RUN, Record_ID, Group, CDX, age_at_subject, APOE.geno)
+cat("Biomarker overlap analysis:\n")
+cat("  - Biomarkers in both files:", length(overlap_biomarkers), "\n")
+cat("  - Unique to standard post-QC:", length(unique_to_standard), "\n")
+cat("  - Unique to Low post-QC:", length(unique_to_low), "\n\n")
 
-  print(kable(dup_details) %>%
-          kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
-} else {
-  cat("No duplicate SAMPLEs found in metadata.\n")
-}
+# Full outer join to combine all samples from both biomarker files
+combined_biomarkers <- biomarkers_postQC %>%
+  full_join(biomarkers_low_postQC,
+            by = "SampleID",
+            suffix = c("_standard", "_low"))
 
-# Check for duplicate SAMPLE_ALIQUOT in metadata
-dup_aliquots_meta <- metadata %>%
-  count(SAMPLE_ALIQUOT) %>%
-  filter(n > 1) %>%
-  arrange(desc(n))
+cat("Combined biomarkers dimensions:", nrow(combined_biomarkers), "rows x", ncol(combined_biomarkers), "columns\n")
 
-if (nrow(dup_aliquots_meta) > 0) {
-  cat("\n\n=== NON-UNIQUE SAMPLE_ALIQUOTs IN METADATA ===\n")
-  cat("Found", nrow(dup_aliquots_meta), "SAMPLE_ALIQUOTs with multiple entries:\n\n")
-  print(kable(dup_aliquots_meta, col.names = c("SAMPLE_ALIQUOT", "Count")) %>%
-          kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
-} else {
-  cat("\n\nNo duplicate SAMPLE_ALIQUOTs found in metadata (all aliquots are unique).\n")
-}
+# Now merge with metadata
+merged_combined <- metadata %>%
+  inner_join(combined_biomarkers,
+            by = c("SAMPLE_ALIQUOT" = "SampleID"),
+            suffix = c("_meta", "_bio"))
 
-# Check for duplicate SampleID in biomarkers
-dup_samples_bio <- biomarkers_postQC %>%
-  count(SampleID) %>%
-  filter(n > 1)
-
-if (nrow(dup_samples_bio) > 0) {
-  cat("\n\n=== NON-UNIQUE SAMPLES IN BIOMARKERS (POST-QC) ===\n")
-  cat("Found", nrow(dup_samples_bio), "SampleIDs with multiple entries:\n\n")
-  print(kable(dup_samples_bio, col.names = c("SampleID", "Count")) %>%
-          kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
-} else {
-  cat("\n\nNo duplicate SampleIDs found in post-QC biomarkers.\n")
-}
+cat("Merged combined file dimensions:", nrow(merged_combined), "rows x", ncol(merged_combined), "columns\n")
+cat("(Only samples present in both metadata and at least one biomarker file)\n")
 ```
 
 # Details
+
 ## File Summaries
 
 ```{r}
@@ -196,10 +176,257 @@ if (!dir.exists("output_files")) {
 # Write merged files
 write_csv(merged_standard, "output_files/merged_standard_post_QC.csv")
 write_csv(merged_low, "output_files/merged_low_post_QC.csv")
+write_csv(merged_combined, "output_files/merged_combined_post_QC.csv")
 
 cat("Merged files written to output_files/\n")
 cat("  - merged_standard_post_QC.csv (", nrow(merged_standard), "rows ×", ncol(merged_standard), "columns)\n")
 cat("  - merged_low_post_QC.csv (", nrow(merged_low), "rows ×", ncol(merged_low), "columns)\n")
+cat("  - merged_combined_post_QC.csv (", nrow(merged_combined), "rows ×", ncol(merged_combined), "columns)\n")
+```
+
+# Sample Quality Control Report
+
+## Create Sample Exclusion Report
+
+```{r}
+#| label: create-exclusion-report
+#| echo: false
+#| results: asis
+
+# Find duplicate samples based on SAMPLE (not SAMPLE_ALIQUOT)
+duplicate_report <- merged_combined %>%
+  group_by(SAMPLE) %>%
+  filter(n() > 1) %>%
+  arrange(SAMPLE, RUN) %>%
+  mutate(
+    duplicate_count = n(),
+    is_oldest = RUN == min(RUN),
+    exclude_reason = ifelse(!is_oldest, "Duplicate - keep most recent RUN only", NA_character_),
+    exclude = !is_oldest
+  ) %>%
+  ungroup()
+
+# Define plausible ranges for metadata variables
+plausible_ranges <- list(
+  age_at_subject = c(40, 120),
+  AOO = c(30, 120),
+  Years_Onset = c(0, 70),
+  height_inches = c(36, 96),
+  weight_lb = c(50, 500),
+  BMI = c(10, 70)
+)
+
+# Check for implausible values
+implausible_list <- list()
+
+for (var in names(plausible_ranges)) {
+  if (var %in% names(merged_combined)) {
+    implausible <- merged_combined %>%
+      filter(!is.na(.data[[var]]) &
+             (.data[[var]] < plausible_ranges[[var]][1] |
+              .data[[var]] > plausible_ranges[[var]][2])) %>%
+      mutate(
+        variable_name = var,
+        implausible_value = .data[[var]],
+        expected_min = plausible_ranges[[var]][1],
+        expected_max = plausible_ranges[[var]][2],
+        exclude_reason = paste0("Implausible ", var, ": ", .data[[var]],
+                               " (expected ", plausible_ranges[[var]][1],
+                               "-", plausible_ranges[[var]][2], ")"),
+        exclude = TRUE
+      )
+
+    if (nrow(implausible) > 0) {
+      implausible_list[[var]] <- implausible
+    }
+  }
+}
+
+# Combine all implausible value reports
+if (length(implausible_list) > 0) {
+  implausible_report <- bind_rows(implausible_list)
+} else {
+  implausible_report <- data.frame()
+}
+
+# Check for illogical Race/Ethnicity combinations
+# Flag only clear contradictions (mutually exclusive categories appearing together)
+illogical_race_eth <- merged_combined %>%
+  filter(
+    # Black AND White in same entry
+    (grepl("BL", Group_Race_Ethnicity) & grepl("WH", Group_Race_Ethnicity)) |
+    # Hispanic AND Non-Hispanic
+    (grepl("HI", Group_Race_Ethnicity) & grepl("NH", Group_Race_Ethnicity)) |
+    # African American AND White
+    (grepl("AA", Group_Race_Ethnicity) & grepl("WH", Group_Race_Ethnicity)) |
+    # African Descent Caribbean AND White
+    (grepl("AFDC", Group_Race_Ethnicity) & grepl("WH", Group_Race_Ethnicity)) |
+    # African Descent Caribbean AND Hispanic
+    (grepl("AFDC", Group_Race_Ethnicity) & grepl("HI", Group_Race_Ethnicity)) |
+    # African American AND Hispanic
+    (grepl("AA", Group_Race_Ethnicity) & grepl("HI", Group_Race_Ethnicity))
+  ) %>%
+  mutate(
+    exclude_reason = paste0("Illogical Race/Ethnicity combination: ", Group_Race_Ethnicity),
+    exclude = TRUE
+  )
+
+if (nrow(illogical_race_eth) > 0) {
+  cat("\nFound", nrow(illogical_race_eth), "samples with illogical Race/Ethnicity combinations\n")
+}
+
+# Start with all samples from merged_combined
+exclusion_report <- merged_combined %>%
+  select(SAMPLE_ALIQUOT, SAMPLE, RUN, Group, Race, Ethnicity, Group_Race_Ethnicity,
+         Case_Control, sex, age_at_subject, CDX, APOE.geno, Site) %>%
+  mutate(
+    exclude = FALSE,
+    exclude_reason = NA_character_
+  )
+
+# Mark duplicates for exclusion (keep only most recent RUN)
+if (nrow(duplicate_report) > 0) {
+  exclusion_report <- exclusion_report %>%
+    left_join(
+      duplicate_report %>%
+        select(SAMPLE_ALIQUOT, exclude, exclude_reason) %>%
+        filter(exclude),
+      by = "SAMPLE_ALIQUOT",
+      suffix = c("", "_dup")
+    ) %>%
+    mutate(
+      exclude = coalesce(exclude_dup, exclude),
+      exclude_reason = coalesce(exclude_reason_dup, exclude_reason)
+    ) %>%
+    select(-exclude_dup, -exclude_reason_dup)
+}
+
+# Mark samples with implausible values for exclusion
+if (nrow(implausible_report) > 0) {
+  # For samples with multiple implausible values, combine reasons
+  implausible_combined <- implausible_report %>%
+    group_by(SAMPLE_ALIQUOT) %>%
+    summarise(
+      exclude_reason_implausible = paste(exclude_reason, collapse = "; "),
+      .groups = "drop"
+    ) %>%
+    mutate(exclude_implausible = TRUE)
+
+  exclusion_report <- exclusion_report %>%
+    left_join(implausible_combined, by = "SAMPLE_ALIQUOT") %>%
+    mutate(
+      # Combine exclusion reasons if both duplicate and implausible
+      exclude_reason = case_when(
+        !is.na(exclude_reason) & !is.na(exclude_reason_implausible) ~
+          paste(exclude_reason, exclude_reason_implausible, sep = "; "),
+        !is.na(exclude_reason_implausible) ~ exclude_reason_implausible,
+        TRUE ~ exclude_reason
+      ),
+      exclude = exclude | coalesce(exclude_implausible, FALSE)
+    ) %>%
+    select(-exclude_reason_implausible, -exclude_implausible)
+}
+
+# Mark samples with illogical race/ethnicity combinations for exclusion
+if (nrow(illogical_race_eth) > 0) {
+  race_eth_combined <- illogical_race_eth %>%
+    group_by(SAMPLE_ALIQUOT) %>%
+    summarise(
+      exclude_reason_race_eth = first(exclude_reason),
+      .groups = "drop"
+    ) %>%
+    mutate(exclude_race_eth = TRUE)
+
+  exclusion_report <- exclusion_report %>%
+    left_join(race_eth_combined, by = "SAMPLE_ALIQUOT") %>%
+    mutate(
+      # Combine exclusion reasons
+      exclude_reason = case_when(
+        !is.na(exclude_reason) & !is.na(exclude_reason_race_eth) ~
+          paste(exclude_reason, exclude_reason_race_eth, sep = "; "),
+        !is.na(exclude_reason_race_eth) ~ exclude_reason_race_eth,
+        TRUE ~ exclude_reason
+      ),
+      exclude = exclude | coalesce(exclude_race_eth, FALSE)
+    ) %>%
+    select(-exclude_reason_race_eth, -exclude_race_eth)
+}
+
+# Summary of what was detected
+cat("=== SAMPLE QUALITY CONTROL SUMMARY ===\n\n")
+
+if (nrow(duplicate_report) > 0) {
+  cat("**Duplicate Samples:**\n")
+  cat("  - Found", n_distinct(duplicate_report$SAMPLE), "samples with multiple runs/aliquots\n")
+  cat("  - Total duplicate entries:", nrow(duplicate_report), "\n")
+  cat("  - Older duplicates flagged for exclusion:", sum(duplicate_report$exclude), "\n\n")
+} else {
+  cat("**Duplicate Samples:** None found\n\n")
+}
+
+if (nrow(implausible_report) > 0) {
+  cat("**Implausible Values:**\n")
+  cat("  - Found", nrow(implausible_report), "samples with implausible values\n")
+  cat("  - See 'Numeric Variables - Range Check' section for details\n\n")
+} else {
+  cat("**Implausible Values:** None found\n\n")
+}
+
+if (nrow(illogical_race_eth) > 0) {
+  cat("**Illogical Race/Ethnicity Combinations:**\n")
+  cat("  - Found", nrow(illogical_race_eth), "samples with inconsistent Race/Ethnicity coding\n")
+  cat("  - Examples:", paste(head(unique(illogical_race_eth$Group_Race_Ethnicity), 5), collapse = ", "), "\n")
+  cat("  - These may indicate data entry errors that need manual review\n\n")
+} else {
+  cat("**Illogical Race/Ethnicity Combinations:** None found\n\n")
+}
+
+# Summary of exclusions
+cat("=== EXCLUSION REPORT SUMMARY ===\n")
+cat("Total samples:", nrow(exclusion_report), "\n")
+cat("Samples to EXCLUDE:", sum(exclusion_report$exclude), "\n")
+cat("Samples to KEEP:", sum(!exclusion_report$exclude), "\n\n")
+
+# Breakdown by reason
+if (sum(exclusion_report$exclude) > 0) {
+  cat("Exclusion reasons breakdown:\n")
+  exclusion_reasons <- exclusion_report %>%
+    filter(exclude) %>%
+    count(exclude_reason) %>%
+    arrange(desc(n))
+
+  print(kable(exclusion_reasons, col.names = c("Reason", "Count")) %>%
+          kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+}
+
+# Write exclusion report
+write_csv(exclusion_report, "output_files/sample_exclusion_report.csv")
+
+cat("\n\nExclusion report written to: output_files/sample_exclusion_report.csv\n")
+cat("This file will be used by Apply_Filters.qmd to filter the merged datasets.\n")
+```
+
+## Samples Flagged for Exclusion
+
+```{r}
+#| label: show-excluded-samples
+#| echo: false
+#| results: asis
+
+excluded_samples <- exclusion_report %>%
+  filter(exclude) %>%
+  arrange(exclude_reason, SAMPLE)
+
+if (nrow(excluded_samples) > 0) {
+  cat("### Detailed List of Excluded Samples\n\n")
+
+  print(kable(excluded_samples,
+              caption = paste0("Samples Flagged for Exclusion (n=",
+                             nrow(excluded_samples), ")")) %>%
+          kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+} else {
+  cat("No samples flagged for exclusion.\n")
+}
 ```
 
 ## Helper Functions for Rare Level Handling
@@ -263,7 +490,7 @@ cat("  - get_freq_table(): Get frequency table with optional rare level handling
 cat("  - summarize_categorical(): Summarize multiple categorical variables\n")
 ```
 
-# Metadata Summaries 
+# Metadata Summaries
 
 ## Metadata Column Summary Table
 
@@ -472,4 +699,3 @@ for (var in vars_to_collapse) {
   }
 }
 ```
-
