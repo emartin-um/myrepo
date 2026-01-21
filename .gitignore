@@ -2,6 +2,9 @@
 .Rhistory
 .RData
 .Ruserdata
+<<<<<<< HEAD
 input_files/*
 output_files/*
 File_Merge.html
+=======
+>>>>>>> 3efdd39aa4a2308d83d08e0e5811907ee85ed25b
