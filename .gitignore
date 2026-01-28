@@ -1,10 +1,24 @@
-.Rproj.user
+# R/RStudio files
+.Rproj.user/
 .Rhistory
 .RData
 .Ruserdata
-<<<<<<< HEAD
-input_files/*
-output_files/*
-File_Merge.html
-=======
->>>>>>> 3efdd39aa4a2308d83d08e0e5811907ee85ed25b
+
+# Data files - keep input/output out of version control
+**/input_files/
+**/output_files/
+
+# HTML output from Quarto/Rmd (regenerated from source)
+*.html
+
+# Quarto cache and output
+*_files/
+*_cache/
+/.quarto/
+
+# Mac system files
+.DS_Store
+
+# Temporary files
+*~
+*.tmp
