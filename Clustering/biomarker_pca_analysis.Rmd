@@ -31,7 +31,7 @@ library(scales)
 
 ```{r load-data}
 # Read the data
-data <- read.csv("meta_plus_race_dx.csv", stringsAsFactors = FALSE)
+data <- read.csv("input_files/meta_plus_race_dx.csv", stringsAsFactors = FALSE)
 
 # Display data dimensions
 cat("Data dimensions:", dim(data)[1], "samples x", dim(data)[2], "columns\n")
@@ -45,7 +45,7 @@ head(data[, 1:10])
 ```{r create-ab-ratio}
 # Function to create AB42/AB40 ratio biomarker
 # Since values are in log2 scale, AB42 - AB40 = log2(AB42/AB40)
-create_ab42_ab40_ratio <- function(input_file = "meta_plus_race_dx.csv") {
+create_ab42_ab40_ratio <- function(input_file = "input_files/meta_plus_race_dx.csv") {
 
   # Read the data
   data <- read.csv(input_file, stringsAsFactors = FALSE)
@@ -84,7 +84,7 @@ create_ab42_ab40_ratio <- function(input_file = "meta_plus_race_dx.csv") {
 }
 
 # Create the AB42/AB40 ratio and update the input file
-data <- create_ab42_ab40_ratio("meta_plus_race_dx.csv")
+data <- create_ab42_ab40_ratio("input_files/meta_plus_race_dx.csv")
 ```
 
 ## Configuration - Edit This Section
@@ -96,7 +96,7 @@ data <- create_ab42_ab40_ratio("meta_plus_race_dx.csv")
 
 # --- DATA SUBSETTING ---
 # Set SUBSET_DATA to TRUE to enable subsetting, FALSE to use all data
-SUBSET_DATA <- TRUE
+SUBSET_DATA <- FALSE
 
 # Choose which variable to subset by (e.g., "CDX", "Race_Ethnicity", "sex", "Site", etc.)
 SUBSET_VARIABLE <- "CDX"
