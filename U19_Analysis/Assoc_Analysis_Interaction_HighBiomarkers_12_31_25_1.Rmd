@@ -1,0 +1,1660 @@
+---
+title: "Association Analysis of High-Count/High-Detectability Biomarkers in U19 Data"
+author: "ERM"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 5
+    toc_float: true
+    code_folding: hide
+---
+
+# A. Overview
+
+This report is an examination of the High-Count and High-Detectability biomarkers after primary QC. 
+12/31/25 I am adapting this to work with larger ALZ123 dataset.
+This fixes a mistake in previous version where I used the wrong SS for the CDX F-test. Now I use Type II SS.
+
+## A.1 Input Data
+
+**Required Input Data Files:** Place all files in a folder called `input_files` in the working directory.
+
+1. **Post-QC Biomarker NPQ data for High-read/High-det markers** (`NPQ_xxxxxxxx_post.csv`) Rows: samples; Columns: biomarkers; Copied from Primary QC `output_files` directory. Assign the filename to the variable `NPQ_data` below.
+2. **Meta-data for U19 samples** (`U19_Alamar_metadata_2025Dec01.csv`)
+
+**OR**
+1. Meta_plus_file <- NULL  # e.g., "meta_plus.csv" to skip data prep
+2. Biomarker_groups_file <- NULL  # e.g., "biomarker_groups.csv" to skip clustering
+
+
+**Output Data Files:** Analyst should create a folder `output_files` in the working directory.
+...
+
+## A.2 Thresholds
+
+Adjustable QC parameters include:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `FDR` | 0.05 | Within-group FDR adjustment|
+
+---
+
+## A.3 Initial Setup 
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+# Optional: If these files exist, skip sections B and C
+Meta_plus_file <- "meta_plus_race_dx.csv"  # e.g., "meta_plus.csv" to skip data prep
+Biomarker_groups_file <- "biomarker_groups.csv"  # e.g., "biomarker_groups.csv" to skip clustering
+
+# Input filenames (only needed if optional files not provided)
+if (is.null(Meta_plus_file)) {
+  NPQ_data <- "NPQ_20251220_post_QC.csv" #SPECIFY THE FILE NAME CONTAINING NPQ DATA
+  Meta_data <- "U19_Alamar_metadata_2025Dec17.csv" #SPECIFY THE FILE NAME CONTAINING META DATA
+}
+
+# Create output folder if it doesn't exist
+if (!dir.exists("output_files")) dir.create("output_files")
+
+# Thresholds
+FDR <- 0.05
+min_group_n <- 3  # Minimum observations required per group in association tests
+# Add this in the setup chunk after the other parameters
+remove_outliers <- FALSE  # Set to TRUE to remove outliers
+outlier_method <- "iqr"  # Options: "iqr", "mad", "zscore"
+outlier_threshold <- 4  # For IQR: multiplier (e.g., 3*IQR); for zscore: number of SDs
+
+```
+  
+Input file is: `NPQ_data`
+
+Sample Counts:
+
+```{r load-and-format, message=FALSE, warning=FALSE, echo=TRUE, eval=is.null(Meta_plus_file)}
+library(tidyverse)
+
+# --- Read biomarker NPQ data ---
+df <- read_csv(file.path("input_files", NPQ_data), show_col_types = FALSE)
+
+#Function to summarize numbers of samples by Run/Bay
+summarize_counts <- function(df, type_name) {
+  df %>%
+    group_by(Run, Bay) %>%
+    summarise(!!type_name := n(), .groups = "drop")
+}
+
+# Summarize counts by Run × Bay
+df_summary <- df %>%
+  group_by(Run, Bay) %>%
+  summarise(All_Samples = n(), .groups = "drop") %>%
+  arrange(Run, Bay)
+
+print(df_summary)
+```
+
+```{r load-meta-plus-early, message=FALSE, warning=FALSE, echo=TRUE, eval=!is.null(Meta_plus_file)}
+# Load pre-existing meta_plus file
+meta_plus <- read_csv(file.path("input_files", Meta_plus_file), show_col_types = FALSE)
+
+cat("Loaded meta_plus from", Meta_plus_file, "\n")
+
+# Summarize counts by Run × Bay from meta_plus
+if ("Run" %in% names(meta_plus) && "Bay" %in% names(meta_plus)) {
+  df_summary <- meta_plus %>%
+    group_by(Run, Bay) %>%
+    summarise(All_Samples = n(), .groups = "drop") %>%
+    arrange(Run, Bay)
+  
+  print(df_summary)
+} else {
+  cat("Total samples:", nrow(meta_plus), "\n")
+}
+```
+
+# B. Biomarkers
+Examine the relationship of biomarker values in the dataset.
+
+## B.1 Clustering
+Cluster the biomakers into smaller groups for ease of visualization.
+
+Start with the whole set:
+
+```{r cluster-biomarkers, message=FALSE, warning=FALSE, echo=TRUE, eval=is.null(Biomarker_groups_file)}
+library(caret)
+library(pheatmap)
+
+# Keep only numeric biomarker columns
+num_cols <- sapply(df, is.numeric)
+samp_num <- df[, num_cols]
+
+# Compute correlation matrix
+cor_mat <- cor(samp_num, use = "pairwise.complete.obs")
+
+# Heatmap of biomarker correlations
+
+pheatmap(cor_mat,
+         main = "Heatmap of Biomarkers",
+         fontsize_row = 6, fontsize_col = 6)
+
+# 1. Visual inspection with dendrogram
+hc <- hclust(as.dist(1 - cor_mat))
+plot(hc, cex = 0.5, main = "Biomarker Dendrogram")
+rect.hclust(hc, k = 8, border = "red")  # Visualize 10 groups
+
+# 2. Cut tree into groups
+n_groups <- 8  # Adjust based on dendrogram
+clusters <- cutree(hc, k = n_groups)
+
+# 3. Create data frame for easy viewing
+cluster_df <- data.frame(
+  Biomarker = names(clusters),
+  Group = clusters
+) %>% arrange(Group)
+
+# 4. Save groups as list
+biomarker_groups <- split(cluster_df$Biomarker, cluster_df$Group)
+
+# 5. Examine each group
+for(i in seq_along(biomarker_groups)) {
+  cat("\n=== Group", i, "===\n")
+  cat("Size:", length(biomarker_groups[[i]]), "\n")
+  print(biomarker_groups[[i]])
+}
+
+# 6. Save to file
+write.csv(cluster_df, "biomarker_groups.csv", row.names = FALSE)
+
+```
+
+```{r load-biomarker-groups, message=FALSE, warning=FALSE, echo=TRUE, eval=!is.null(Biomarker_groups_file)}
+# Load pre-existing biomarker groups
+cluster_df <- read_csv(file.path("input_files", Biomarker_groups_file), 
+                       show_col_types = FALSE,
+                       locale = locale(encoding = "UTF-8"))
+biomarker_groups <- split(cluster_df$Biomarker, cluster_df$Group)
+
+cat("Loaded", length(biomarker_groups), "biomarker groups from", Biomarker_groups_file, "\n")
+for(i in seq_along(biomarker_groups)) {
+  cat("\n=== Group", i, "===\n")
+  cat("Size:", length(biomarker_groups[[i]]), "\n")
+}
+```
+
+## B.2 Biomarker Groups
+
+```{r heatmaps-plots--biomarkers, message=FALSE, warning=FALSE, echo=TRUE, results='asis', eval= FALSE}
+
+plot_group_heatmaps <- function(df, biomarker_groups, cor_mat = NULL,
+                                show_numbers = FALSE,
+                                min_group_size = 2,
+                                fontsize = 8,
+                                add_boxplots = TRUE) {
+  library(pheatmap)
+  library(ggplot2)
+  library(tidyr)
+  library(dplyr)
+  
+  # If correlation matrix not provided, compute it
+  if (is.null(cor_mat)) {
+    num_cols <- sapply(df, is.numeric)
+    samp_num <- df[, num_cols]
+    cor_mat <- cor(samp_num, use = "pairwise.complete.obs")
+  }
+  
+  # Get numeric data for boxplots
+  num_cols <- sapply(df, is.numeric)
+  samp_num <- df[, num_cols]
+  
+  # Summary statistics
+  cat("**Total groups:** ", length(biomarker_groups), "\n\n")
+  cat("**Total biomarkers:** ", sum(sapply(biomarker_groups, length)), "\n\n")
+  
+  # Group size distribution
+  group_sizes <- sapply(biomarker_groups, length)
+  cat("**Group sizes:** Min =", min(group_sizes), 
+      ", Max =", max(group_sizes),
+      ", Mean =", round(mean(group_sizes), 1), "\n\n")
+  cat("---\n\n")
+  
+  # Loop through each group
+  for (i in seq_along(biomarker_groups)) {
+    group_biomarkers <- biomarker_groups[[i]]
+    
+    # Print header
+    cat("\n### Group", i, "\n")
+    cat("**Size:** ", length(group_biomarkers), " biomarker(s)\n\n")
+    
+    # Skip if group is too small
+    if (length(group_biomarkers) < min_group_size) {
+      cat("*Group has fewer than", min_group_size, "biomarkers - skipping visualizations.*\n\n")
+      cat("**Biomarkers:**", paste(group_biomarkers, collapse = ", "), "\n\n")
+      next
+    }
+    
+    # Show biomarker list
+    cat("**Biomarkers:**\n\n")
+    cat(paste("-", group_biomarkers, collapse = "\n\n"), "\n\n")
+    
+    # Subset correlation matrix for this group
+    group_cor <- cor_mat[group_biomarkers, group_biomarkers]
+    
+    # Summary statistics for this group
+    upper_tri <- group_cor[upper.tri(group_cor)]
+    cat("**Correlation summary:**\n\n")
+    cat("- Mean correlation:", round(mean(upper_tri), 3), "\n\n")
+    cat("- Median correlation:", round(median(upper_tri), 3), "\n\n")
+    cat("- Range:", round(min(upper_tri), 3), "to", round(max(upper_tri), 3), "\n\n")
+    
+    # Create heatmap
+    cat("#### Correlation Heatmap\n")
+    pheat_obj <- NULL
+    tryCatch({
+      # Adjust font size based on group size
+      auto_fontsize <- max(4, min(fontsize, 12 - length(group_biomarkers) / 5))
+      
+      pheat_obj <- pheatmap(group_cor,
+                            main = paste("Group", i, "Correlation Heatmap"),
+                            fontsize_row = auto_fontsize,
+                            fontsize_col = auto_fontsize,
+                            display_numbers = show_numbers,
+                            number_color = "black",
+                            border_color = "grey60",
+                            cellwidth = max(10, 200 / length(group_biomarkers)),
+                            cellheight = max(10, 200 / length(group_biomarkers)))
+    }, error = function(e) {
+      cat("*Error creating heatmap for this group.*\n\n")
+    })
+    
+    cat("\n")
+    
+    # Add boxplots if requested
+    if (add_boxplots && !is.null(pheat_obj)) {
+      cat("\n#### Distribution Boxplots\n")
+      
+      tryCatch({
+        # Subset data for this group
+        group_data <- samp_num[, group_biomarkers, drop = FALSE]
+        
+        # Extract the row order from pheatmap
+        biomarker_order <- rownames(group_cor)[pheat_obj$tree_row$order]
+        
+        # Convert to long format for ggplot
+        group_long <- group_data %>%
+          pivot_longer(cols = everything(),
+                       names_to = "Biomarker",
+                       values_to = "Value") %>%
+          mutate(Biomarker = factor(Biomarker, levels = biomarker_order))
+        
+        # Create boxplot
+        p <- ggplot(group_long, aes(x = Biomarker, y = Value)) +
+          geom_boxplot(fill = "steelblue", alpha = 0.7, outlier.color = "red") +
+          theme_minimal() +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1, size = auto_fontsize),
+                axis.text.y = element_text(size = 8),
+                plot.title = element_text(size = 12, face = "bold")) +
+          labs(title = paste("Group", i, "- Biomarker Distributions"),
+               x = "Biomarker",
+               y = "Value") +
+          coord_flip()
+        
+        print(p)
+        
+      }, error = function(e) {
+        cat("*Error creating boxplots for this group.*\n\n")
+      })
+      
+      cat("\n\n")
+    }
+  }
+}
+
+plot_group_heatmaps(df, biomarker_groups, cor_mat, 
+                    show_numbers = FALSE,
+                    min_group_size = 3,
+                    fontsize = 8,
+                    add_boxplots = TRUE)
+
+```
+
+# C. Meta-data
+For each group, are covariates (sex, age, AD) associated with biomarkers (ignoring lod).
+I'm curious to look at error above and below the lod. Also, how are these dostributed across plates?
+
+## C.1 Summary
+
+```{r get_meta, message=FALSE, warning=FALSE, echo=TRUE, results= 'asis', eval=is.null(Meta_plus_file)}
+library(dplyr)
+
+summarize_df_pretty <- function(df, exclude_cols = NULL) {
+  
+  # Exclude columns if specified
+  if (!is.null(exclude_cols)) {
+    df <- df %>% select(-all_of(exclude_cols))
+  }
+  
+  # --- Numeric summary ---
+  num_summary <- df %>%
+    select(where(is.numeric)) %>%
+    pivot_longer(cols = everything(), names_to = "Column", values_to = "Value") %>%
+    group_by(Column) %>%
+    summarise(
+      Summary = paste0(
+        "min=", round(min(Value, na.rm = TRUE),2), 
+        ", Q1=", round(quantile(Value, 0.25, na.rm = TRUE),2),
+        ", median=", round(median(Value, na.rm = TRUE),2),
+        ", Q3=", round(quantile(Value, 0.75, na.rm = TRUE),2),
+        ", max=", round(max(Value, na.rm = TRUE),2),
+        ", mean=", round(mean(Value, na.rm = TRUE), 2),
+        ", sd=", round(sd(Value, na.rm = TRUE), 2)
+      ),
+      .groups = "drop"
+    )
+  
+  # --- Character/factor summary ---
+  char_summary <- df %>%
+    select(where(~is.character(.) || is.factor(.))) %>%
+    pivot_longer(cols = everything(), names_to = "Column", values_to = "Value") %>%
+    group_by(Column, Value) %>%
+    summarise(Count = n(), .groups = "drop") %>%
+    arrange(Column, desc(Count)) %>%
+    group_by(Column) %>%
+    summarise(Summary = paste0(Value, " (", Count, ")", collapse = "; "), .groups = "drop")
+  
+  # --- Combine numeric and character summaries ---
+  bind_rows(num_summary, char_summary) %>%
+    arrange(Column)
+}
+
+meta_df <- read_csv(file.path("input_files", Meta_data), show_col_types = FALSE)
+
+meta_plus <- meta_df %>%
+  semi_join(df, by = c("SAMPLE_ALIQUOT" = "SampleID")) %>%   # keep only matching samples
+  left_join(
+    df ,
+    by = c("SAMPLE_ALIQUOT" = "SampleID")
+  )
+
+meta_plus <- meta_plus %>% rename(SampleID = SAMPLE_ALIQUOT, APOE.geno = APOE.x, APOE = APOE.y) #This is combined covariate and biom data
+
+summary_table <- summarize_df_pretty(meta_plus[,5:23])
+knitr::kable(summary_table, caption = "Summary of Meta-data")
+
+knitr::kable(meta_plus %>% count(Race, Ethnicity, sex))
+
+```
+
+```{r load_meta_plus, message=FALSE, warning=FALSE, echo=TRUE, results= 'asis', eval=!is.null(Meta_plus_file)}
+# Load pre-existing meta_plus file (already loaded earlier for sample counts, but defining here for clarity)
+if (!exists("meta_plus")) {
+  meta_plus <- read_csv(file.path("input_files", Meta_plus_file), show_col_types = FALSE)
+}
+
+cat("Loaded meta_plus from", Meta_plus_file, "\n")
+cat("Dimensions:", nrow(meta_plus), "rows x", ncol(meta_plus), "columns\n\n")
+
+# Function to summarize dataframe
+summarize_df_pretty <- function(df, exclude_cols = NULL) {
+  
+  # Exclude columns if specified
+  if (!is.null(exclude_cols)) {
+    df <- df %>% select(-all_of(exclude_cols))
+  }
+  
+  # --- Numeric summary ---
+  num_summary <- df %>%
+    select(where(is.numeric)) %>%
+    pivot_longer(cols = everything(), names_to = "Column", values_to = "Value") %>%
+    group_by(Column) %>%
+    summarise(
+      Summary = paste0(
+        "min=", round(min(Value, na.rm = TRUE),2), 
+        ", Q1=", round(quantile(Value, 0.25, na.rm = TRUE),2),
+        ", median=", round(median(Value, na.rm = TRUE),2),
+        ", Q3=", round(quantile(Value, 0.75, na.rm = TRUE),2),
+        ", max=", round(max(Value, na.rm = TRUE),2),
+        ", mean=", round(mean(Value, na.rm = TRUE), 2),
+        ", sd=", round(sd(Value, na.rm = TRUE), 2)
+      ),
+      .groups = "drop"
+    )
+  
+  # --- Character/factor summary ---
+  char_summary <- df %>%
+    select(where(~is.character(.) || is.factor(.))) %>%
+    pivot_longer(cols = everything(), names_to = "Column", values_to = "Value") %>%
+    group_by(Column, Value) %>%
+    summarise(Count = n(), .groups = "drop") %>%
+    arrange(Column, desc(Count)) %>%
+    group_by(Column) %>%
+    summarise(Summary = paste0(Value, " (", Count, ")", collapse = "; "), .groups = "drop")
+  
+  # --- Combine numeric and character summaries ---
+  bind_rows(num_summary, char_summary) %>%
+    arrange(Column)
+}
+
+# Summary table
+if (ncol(meta_plus) >= 16) {
+  summary_table <- summarize_df_pretty(meta_plus[,5:23])
+  knitr::kable(summary_table, caption = "Summary of Meta-data")
+}
+
+# Basic summary
+knitr::kable(meta_plus %>% count(Group, Race, Ethnicity, sex))
+```
+
+* **Categories to keep: BL-NH, BL-HI, MU-HI, WH-HI**
+
+# D. Main Effects
+For each Group of biomarkers, test for association adjusting for covariates. Test for main effects with CDX.
+
+## D.1 Outlier Detection
+```{r identify-outliers, message=FALSE, warning=FALSE, echo=TRUE, results='asis'}
+library(dplyr)
+library(tidyr)
+
+# Function to identify outliers
+identify_outliers <- function(data, biomarker_groups, method = "iqr", threshold = 3, 
+                              sample_id_col = "SampleID") {
+  
+  # Get all biomarker columns
+  all_biomarkers <- unlist(biomarker_groups)
+  
+  outlier_list <- list()
+  outlier_summary <- data.frame()
+  outlier_details <- list()
+  
+  for (biomarker in all_biomarkers) {
+    if (!biomarker %in% names(data)) next
+    
+    values <- data[[biomarker]]
+    
+    if (method == "iqr") {
+      # IQR method (Tukey's fences)
+      Q1 <- quantile(values, 0.25, na.rm = TRUE)
+      Q3 <- quantile(values, 0.75, na.rm = TRUE)
+      IQR <- Q3 - Q1
+      lower_fence <- Q1 - threshold * IQR
+      upper_fence <- Q3 + threshold * IQR
+      outliers <- which(values < lower_fence | values > upper_fence)
+      
+    } else if (method == "mad") {
+      # Median Absolute Deviation (more robust)
+      med <- median(values, na.rm = TRUE)
+      mad <- median(abs(values - med), na.rm = TRUE)
+      lower_fence <- med - threshold * mad
+      upper_fence <- med + threshold * mad
+      outliers <- which(values < lower_fence | values > upper_fence)
+      
+    } else if (method == "zscore") {
+      # Z-score method
+      mean_val <- mean(values, na.rm = TRUE)
+      sd_val <- sd(values, na.rm = TRUE)
+      z_scores <- abs((values - mean_val) / sd_val)
+      outliers <- which(z_scores > threshold)
+    }
+    
+    if (length(outliers) > 0) {
+      outlier_list[[biomarker]] <- outliers
+      
+      # Get sample IDs and values for outliers with additional info
+      outlier_df <- data.frame(
+        Biomarker = biomarker,
+        Value = values[outliers]
+      )
+      
+      if (sample_id_col %in% names(data)) {
+        outlier_df$SampleID <- data[[sample_id_col]][outliers]
+      }
+      
+      if ("CDX" %in% names(data)) {
+        outlier_df$CDX <- data[["CDX"]][outliers]
+      }
+      
+      if ("age_at_sample" %in% names(data)) {
+        outlier_df$age_at_sample <- data[["age_at_sample"]][outliers]
+      }
+      
+      if ("Group2" %in% names(data)) {
+        outlier_df$Group2 <- data[["Group2"]][outliers]
+      }
+      
+      if ("Country/State" %in% names(data)) {
+        outlier_df$`Country/State` <- data[["Country/State"]][outliers]
+      }
+      
+      # Sort by Value (highest to lowest)
+      outlier_df <- outlier_df %>% arrange(desc(Value))
+      
+      outlier_details[[biomarker]] <- outlier_df
+      
+      # Add to summary
+      outlier_summary <- bind_rows(
+        outlier_summary,
+        data.frame(
+          Biomarker = biomarker,
+          N_outliers = length(outliers),
+          Pct_outliers = round(100 * length(outliers) / length(values), 2),
+          Method = method,
+          Threshold = threshold
+        )
+      )
+    }
+  }
+  
+  return(list(outliers = outlier_list, 
+              summary = outlier_summary, 
+              details = outlier_details))
+}
+
+# Identify outliers
+cat("**Method:**", outlier_method, "\n")
+cat("**Threshold:**", outlier_threshold, "\n\n")
+
+outlier_results <- identify_outliers(meta_plus, biomarker_groups, 
+                                     method = outlier_method, 
+                                     threshold = outlier_threshold)
+
+# REPORTING SECTION STARTS HERE (replaces the old one)
+if (nrow(outlier_results$summary) > 0) {
+  cat("\n**Biomarkers with outliers:**\n\n")
+  knitr::kable(outlier_results$summary %>% arrange(desc(N_outliers)))
+  
+  # Show sample IDs for biomarkers with outliers
+  cat("\n\n### Outlier Details\n\n")
+  
+  for (biom in names(outlier_results$details)) {
+    cat("\n####", biom, "\n\n")
+    print(knitr::kable(outlier_results$details[[biom]]))
+    cat("\n")
+  }
+  
+  # Also save to CSV for reference
+  all_outlier_details <- bind_rows(outlier_results$details)
+  write.csv(all_outlier_details, "output_files/outlier_details.csv", row.names = FALSE)
+  cat("\n**Outlier details saved to:** output_files/outlier_details.csv\n\n")
+  
+  # Show details for biomarkers with many outliers
+  high_outlier_biomarkers <- outlier_results$summary %>%
+    filter(Pct_outliers > 5) %>%
+    pull(Biomarker)
+  
+  if (length(high_outlier_biomarkers) > 0) {
+    cat("\n\n**Biomarkers with >5% outliers - consider investigating:**\n\n")
+    for (biom in high_outlier_biomarkers) {
+      cat("-", biom, "\n")
+    }
+    cat("\n")
+  }
+  
+  # Option to remove outliers
+  if (remove_outliers) {
+    cat("\n**Removing outliers from data...**\n\n")
+    
+    meta_plus_clean <- meta_plus
+    n_removed_total <- 0
+    
+    for (biomarker in names(outlier_results$outliers)) {
+      outlier_indices <- outlier_results$outliers[[biomarker]]
+      meta_plus_clean[outlier_indices, biomarker] <- NA
+      n_removed_total <- n_removed_total + length(outlier_indices)
+    }
+    
+    cat("Set", n_removed_total, "outlier values to NA across", 
+        length(outlier_results$outliers), "biomarkers\n\n")
+    
+    # Replace meta_plus with cleaned version
+    meta_plus <- meta_plus_clean
+  }
+  
+} else {
+  cat("\n**No outliers detected.**\n\n")
+}
+```
+
+## D.2 Association Tests for CDX
+```{r assoc_cdx_adj_main, message=FALSE, warning=FALSE, echo=TRUE, results= 'asis', eval=TRUE}
+library(dplyr)
+library(purrr)
+library(broom)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(tidyr)
+library(gridExtra)
+library(emmeans)
+library(car)  # Add to your libraries
+
+
+# Function to run CDX association analysis with adjustable covariates
+run_cdx_analysis <- function(meta_plus, biomarker_groups, 
+                              adjust_covariates = c("sex", "age_at_sample"),
+                              fdr_threshold = FDR,
+                              min_n = 10) {
+  
+  # Helper function to wrap variable names in backticks if needed
+  protect_name <- function(name) {
+    if (grepl("[^a-zA-Z0-9_.]", name)) {
+      return(paste0("`", name, "`"))
+    }
+    return(name)
+  }
+  
+  # Prepare data with all covariates
+meta_plus_adj <- meta_plus %>%
+  mutate(
+    CDX_grouped = case_when(
+      CDX %in% c("NCI", "Non - Cognitively Impaired", "Cognitively Normal") ~ "NCI",
+      CDX == "MCI" ~ "MCI",
+      CDX %in% c("AD", "Alzheimers Disease") ~ "AD",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(CDX_grouped))
+
+# Determine which levels are actually present
+present_levels <- intersect(c("NCI", "MCI", "AD"), unique(meta_plus_adj$CDX_grouped))
+
+# Factor with only present levels
+meta_plus_adj <- meta_plus_adj %>%
+  mutate(CDX_grouped = factor(CDX_grouped, levels = present_levels))
+
+cat("\n**CDX levels present in data:**", paste(present_levels, collapse = ", "), "\n\n")
+  
+  # Filter for complete cases on covariates
+  meta_plus_adj <- meta_plus_adj %>%
+    filter(if_all(all_of(adjust_covariates), ~ !is.na(.)))
+  
+  # After filtering for complete cases, add this more comprehensive check:
+
+# Check minimum sample size per CDX group
+cdx_counts <- table(meta_plus_adj$CDX_grouped)
+cat("\n**CDX Group Sizes:**\n")
+print(cdx_counts)
+cat("\n")
+
+# Check CDX × covariate combinations for factor covariates
+for (cov in adjust_covariates) {
+  if (is.factor(meta_plus_adj[[cov]]) || is.character(meta_plus_adj[[cov]])) {
+    cat("\n**CDX ×", cov, "cross-tabulation:**\n")
+    cross_tab <- table(meta_plus_adj$CDX_grouped, meta_plus_adj[[cov]])
+    print(cross_tab)
+    
+    # Check if any cell has < min_n
+    if (any(cross_tab < min_n)) {
+      cat("\n**WARNING: Some CDX ×", cov, "combinations have fewer than", min_n, "observations.**\n")
+      small_cells <- which(cross_tab < min_n, arr.ind = TRUE)
+      for (i in 1:nrow(small_cells)) {
+        cat("  -", rownames(cross_tab)[small_cells[i,1]], "×", 
+            colnames(cross_tab)[small_cells[i,2]], ":", 
+            cross_tab[small_cells[i,1], small_cells[i,2]], "\n")
+      }
+      cat("\n**Analysis may be unreliable. Consider removing this covariate or collapsing levels.**\n\n")
+      return(invisible(NULL))
+    }
+  }
+}
+  
+  # Convert factor covariates
+  for (cov in adjust_covariates) {
+    if (is.character(meta_plus_adj[[cov]])) {
+      meta_plus_adj[[cov]] <- factor(meta_plus_adj[[cov]])
+    }
+  }
+  
+  # Create covariate string for formula and display
+  if (length(adjust_covariates) > 0) {
+    protected_covariates <- sapply(adjust_covariates, protect_name)
+    cov_formula <- paste(protected_covariates, collapse = " + ")
+    cov_display <- paste(adjust_covariates, collapse = ", ")
+    model_title <- paste0("Biomarker ~ CDX + ", cov_display)
+  } else {
+    cov_formula <- ""
+    cov_display <- "none"
+    model_title <- "Biomarker ~ CDX"
+  }
+  
+  # cat("\n#### Adjusted CDX Association Analysis\n\n")
+  cat("**Adjusting for:** ", cov_display, "\n\n")
+  cat("**Sample size after filtering:** ", nrow(meta_plus_adj), "\n\n")
+  cat("**CDX Distribution:**\n\n")
+  print(table(meta_plus_adj$CDX_grouped))
+  cat("\n\n")
+  
+  # Initialize list to store all significant results
+  all_sig_results <- list()
+  
+  # Loop through each group
+  for (i in seq_along(biomarker_groups)) {
+    group_biomarkers <- biomarker_groups[[i]]
+    
+    cat("\n##### Group", i, "\n\n")
+    
+    # Subset data for this group
+    select_cols <- c("CDX_grouped", adjust_covariates, group_biomarkers)
+    group_data_adj <- meta_plus_adj %>% 
+      select(all_of(select_cols))
+    
+    biomarkers <- group_biomarkers
+    
+    # Run linear models - get coefficient p-values for CDX levels
+results_adj <- map_df(
+  biomarkers,
+  ~ {
+    tryCatch({
+      # Build formula with protected names
+      protected_biomarker <- protect_name(.x)
+      
+      if (length(adjust_covariates) > 0) {
+        formula_str <- paste(protected_biomarker, "~ CDX_grouped +", cov_formula)
+      } else {
+        formula_str <- paste(protected_biomarker, "~ CDX_grouped")
+      }
+     
+
+lm_fit <- lm(as.formula(formula_str), data = group_data_adj)
+
+
+      # Get coefficient table
+      coef_table <- summary(lm_fit)$coefficients
+      
+      # Extract p-values for CDX_grouped levels (MCI and AD vs NCI reference)
+      # Reference level is NCI, so we get MCI and AD coefficients
+      cdx_rows <- grep("CDX_grouped", rownames(coef_table))
+      
+      result <- tibble(Biomarker = .x)
+      
+      # Add p-values for each CDX level
+      for (row_idx in cdx_rows) {
+        coef_name <- rownames(coef_table)[row_idx]
+        # Clean up the name (e.g., "CDX_groupedMCI" -> "MCI")
+        level_name <- gsub("CDX_grouped", "", coef_name)
+        result[[paste0("p_", level_name)]] <- coef_table[row_idx, "Pr(>|t|)"]
+        result[[paste0("estimate_", level_name)]] <- coef_table[row_idx, "Estimate"]
+      }
+      
+    # Use Type II ANOVA (tests each term after all others)
+aov_result <- Anova(lm_fit, type = "II")
+
+result$F_statistic <- aov_result["CDX_grouped", "F value"]
+result$p_overall <- aov_result["CDX_grouped", "Pr(>F)"]
+
+      result
+      
+    }, error = function(e) {
+      tibble(Biomarker = .x, F_statistic = NA, p_overall = NA)
+    })
+  }
+)
+    
+   # Add FDR correction
+results_adj <- results_adj %>%
+  arrange(p_overall) %>%
+  mutate(FDR = p.adjust(p_overall, method = "fdr"))
+    
+  results_adj_display <- results_adj %>%
+  select(Biomarker, starts_with("estimate_"), starts_with("p_"), F_statistic, p_overall, FDR)
+    
+    # Create the header text first
+    header_text <- paste0("Linear Model: ", model_title, " (Overall F-test for CDX)")
+    
+    print(
+  results_adj_display %>%
+    kbl(format = "html", digits = 4) %>%
+    add_header_above(setNames(ncol(results_adj_display), header_text)) %>%  # Dynamic column count
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width = FALSE
+    )
+)
+    cat("\n\n")
+    
+    # Identify significant biomarkers
+    sig_adj_biomarkers <- results_adj %>%
+      filter(FDR < fdr_threshold) %>%
+      pull(Biomarker)
+    
+  # Store significant results for this group
+  sig_results_group <- results_adj %>%
+    filter(FDR < fdr_threshold) %>%
+    mutate(Group = i)
+  
+  if (nrow(sig_results_group) > 0) {
+    all_sig_results[[length(all_sig_results) + 1]] <- sig_results_group
+  }
+     
+    if (length(sig_adj_biomarkers) > 0) {
+      cat("\n**Significant CDX Associations (FDR <", fdr_threshold, "):** ", 
+          length(sig_adj_biomarkers), "biomarkers\n\n")
+      
+      if (length(adjust_covariates) > 0) {
+        cat("*Adjusted for:", cov_display, "*\n\n")
+      }
+      
+      # Split into chunks if too many
+      max_per_page <- 6
+      n_pages <- ceiling(length(sig_adj_biomarkers) / max_per_page)
+      
+      for (page in 1:n_pages) {
+        start_idx <- (page - 1) * max_per_page + 1
+        end_idx <- min(page * max_per_page, length(sig_adj_biomarkers))
+        page_biomarkers <- sig_adj_biomarkers[start_idx:end_idx]
+        
+        if (n_pages > 1) {
+          cat("\n*Page", page, "of", n_pages, "*\n\n")
+        }
+        
+        # Prepare raw data for boxplots
+        cdx_plot_data <- group_data_adj %>%
+          select(CDX_grouped, all_of(page_biomarkers)) %>%
+          pivot_longer(cols = all_of(page_biomarkers),
+                       names_to = "Biomarker",
+                       values_to = "Value")
+        
+        # Get adjusted means for each biomarker
+        adj_means_list <- lapply(page_biomarkers, function(biom) {
+  tryCatch({
+    protected_biomarker <- protect_name(biom)
+    
+    if (length(adjust_covariates) > 0) {
+      formula_str <- paste(protected_biomarker, "~ CDX_grouped +", cov_formula)
+    } else {
+      formula_str <- paste(protected_biomarker, "~ CDX_grouped")
+    }
+    
+    lm_fit <- lm(as.formula(formula_str), data = group_data_adj)
+    
+    # Try to compute emmeans with error handling
+    emm <- tryCatch({
+      emmeans(lm_fit, ~ CDX_grouped)
+    }, error = function(e) {
+      cat("  Warning: Could not compute emmeans for", biom, "\n")
+      cat("  Error:", e$message, "\n")
+      return(NULL)
+    })
+    
+    if (is.null(emm)) return(NULL)
+    
+    emm_df <- as.data.frame(emm) %>%
+      mutate(Biomarker = biom) %>%
+      rename(Value = emmean,
+             lower = lower.CL,
+             upper = upper.CL)
+    return(emm_df)
+  }, error = function(e) {
+    return(NULL)
+  })
+})
+        
+        adj_means_data <- bind_rows(adj_means_list)
+        
+        # Create subtitle
+        if (length(adjust_covariates) > 0) {
+          subtitle_text <- paste0("Red diamonds show adjusted means Â± 95% CI (controlling for ", 
+                                  cov_display, ")")
+        } else {
+          subtitle_text <- "Red diamonds show means Â± 95% CI"
+        }
+
+        # Create boxplot with adjusted means overlaid
+       p_cdx <- ggplot(cdx_plot_data, aes(x = CDX_grouped, y = Value, fill = CDX_grouped)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = 16, outlier.size = 1) +
+  geom_jitter(width = 0.2, alpha = 0.2, size = 0.8) +
+  geom_point(data = adj_means_data,
+             aes(x = CDX_grouped, y = Value),  # Explicitly set x and y
+             color = "red", shape = 18, size = 4, 
+             inherit.aes = FALSE,  # Add this!
+             position = position_nudge(x = 0.25)) +
+  geom_errorbar(data = adj_means_data,
+                aes(x = CDX_grouped, ymin = lower, ymax = upper),
+                color = "red", width = 0.15, linewidth = 0.8,
+                inherit.aes = FALSE,  # Add this too!
+                position = position_nudge(x = 0.25)) +
+  facet_wrap(~ Biomarker, scales = "free_y", ncol = 3) +
+          scale_fill_manual(
+            values = c("NCI" = "#2ECC71", "MCI" = "#F39C12", "AD" = "#E74C3C"),
+            name = "CDX"
+          ) +
+          theme_minimal() +
+          theme(
+            strip.text = element_text(face = "bold", size = 9),
+            axis.text.x = element_text(size = 9, angle = 45, hjust = 1),
+            legend.position = "bottom"
+          ) +
+          labs(
+            title = paste("Group", i, "- Adjusted CDX Associations (FDR <", fdr_threshold, ")"),
+            subtitle = subtitle_text,
+            x = "Clinical Diagnosis",
+            y = "Biomarker Value"
+          )
+        
+        print(p_cdx)
+        cat("\n\n")
+      }
+      
+      # Model estimates for significant biomarkers
+      cat("\n**Model Fit for Significant Biomarkers:**\n\n")
+      
+      for (biom in sig_adj_biomarkers) {
+        cat("\n*", biom, "*\n\n")
+        
+        tryCatch({
+          protected_biomarker <- protect_name(biom)
+          
+          if (length(adjust_covariates) > 0) {
+            formula_str <- paste(protected_biomarker, "~ CDX_grouped +", cov_formula)
+          } else {
+            formula_str <- paste(protected_biomarker, "~ CDX_grouped")
+          }
+          
+          lm_fit <- lm(as.formula(formula_str), data = group_data_adj)
+           
+          print(
+            summary(lm_fit)$coefficients %>%
+              as.data.frame() %>%
+              kbl(format = "html", digits = 4) %>%
+              kable_styling(
+                bootstrap_options = c("condensed"),
+                full_width = FALSE
+              )
+          )
+            
+         cat("\n\n")
+        }, error = function(e) {
+          cat("Error computing model fit\n\n")
+        })
+      }
+    } else {
+      cat("\n*No significant CDX associations at FDR <", fdr_threshold, "*\n\n")
+    }
+    
+    cat("\n---\n\n")
+  }
+  
+# Combine all significant results
+if (length(all_sig_results) > 0) {
+  combined_sig_results <- bind_rows(all_sig_results) %>%
+    arrange(FDR, p_overall)
+  
+  cat("\n\n### Summary of All Significant Results\n\n")
+  cat("**Total significant biomarkers across all groups:**", 
+      nrow(combined_sig_results), "\n\n")
+  
+  print(
+    combined_sig_results %>%
+      select(Group, Biomarker, starts_with("estimate_"), starts_with("p_"), FDR) %>%
+      kbl(format = "html", digits = 4) %>%
+      kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+      )
+  )
+  cat("\n\n")
+  
+  return(invisible(combined_sig_results))
+} else {
+  cat("\n\n## Summary: No significant results across any groups\n\n")
+  return(invisible(NULL))
+}
+}
+
+#First we have to filter to race/ethnicity that we want to include
+# Remove the few Black Hispanics
+meta_plus_filtered <- meta_plus %>%
+  filter(!(Race %in% c("AA", "AFDC") & Ethnicity == "HI"))
+
+# Make Group2 variable to capture the major groups
+meta_plus_filtered <- meta_plus_filtered %>%
+  mutate(
+    Group2 = case_when(
+      Group == "AA" ~ "AA",
+      Group == "AFDC" ~ "AFDC",
+      Group == "HI" ~ Race_Ethnicity,
+      TRUE ~ NA_character_
+    ),
+    Group2 = factor(Group2, levels = c("AA", "AFDC", "MU_HI", "WH_HI"))
+  )
+
+cat("\n### **Black and Hispanic with Group Adjustment:**\n\n")
+main_sig=run_cdx_analysis(meta_plus_filtered, biomarker_groups, 
+                 adjust_covariates = c("sex", "age_at_sample", "Group2"),
+                 min_n = min_group_n)
+
+cat("\n### **Hispanic Only (WH or MU):**\n\n")
+ meta_plus_filtered_HI <- meta_plus_filtered %>%
+   filter(Group2 %in% c("WH_HI", "MU_HI"))%>%
+  mutate(Group2 = droplevels(Group2)) 
+
+main_sig=run_cdx_analysis(meta_plus_filtered_HI, biomarker_groups, 
+                 adjust_covariates = c("sex", "age_at_sample", "Group2"),
+                 min_n = min_group_n)
+
+cat("\n### **Black Only (AA and AFDC), No Country/State Adjustment:**\n\n")
+ meta_plus_filtered_BL <- meta_plus_filtered %>%
+   filter(Group2 %in% c("AA", "AFDC"))%>%
+  mutate(Group2 = droplevels(Group2)) 
+
+main_sig=run_cdx_analysis(meta_plus_filtered_BL, biomarker_groups, 
+                 adjust_covariates = c("sex", "age_at_sample", "Group2"),
+                 min_n = min_group_n)
+
+# Remove AFDC countries with low counts
+meta_plus_filtered_BL2 <- meta_plus_filtered_BL %>%
+  filter(!.data[["Country/State"]] %in% c("Mozambique", "Ethiopia"))
+
+cat("\n### **Black with Country/State:**\n\n")
+main_sig=run_cdx_analysis(meta_plus_filtered_BL2, biomarker_groups, 
+                 adjust_covariates = c("sex", "age_at_sample", "Country/State"),
+                 min_n = min_group_n)
+
+# Remove AFDC for AA only
+meta_plus_filtered_AA <- meta_plus_filtered_BL %>%
+  filter(Group2 %in% c("AA"))
+
+cat("\n### **AA only, No Country/State:**\n\n")
+main_sig=run_cdx_analysis(meta_plus_filtered_AA, biomarker_groups, 
+                 adjust_covariates = c("sex", "age_at_sample"),
+                 min_n = min_group_n)
+
+# Remove BL for AFDC only
+meta_plus_filtered_AF <- meta_plus_filtered_BL2 %>%
+  filter(Group2 %in% c("AFDC"))
+
+# Too few Males with MCI, either drop MCI or don't adjust for sex.
+
+cat("\n### **AFDC only with Country/State:**\n\n")
+main_sig=run_cdx_analysis(meta_plus_filtered_AF, biomarker_groups, 
+                 adjust_covariates = c("sex", "age_at_sample", "Country/State"),
+                 min_n = min_group_n)
+
+cat("\n### **AFDC only, No Country/State for comparison:**\n\n")
+main_sig=run_cdx_analysis(meta_plus_filtered_AF, biomarker_groups, 
+                 adjust_covariates = c("sex", "age_at_sample"),
+                 min_n = min_group_n)
+
+# Take out MCI
+# meta_plus_filtered <- meta_plus_filtered %>%
+#   filter(CDX %in% c("NCI", "AD"))
+
+
+```
+
+# E. Interactions
+
+For biomarkers with significant CDX main effects, include interactions between CDX and covariates. Look for biomarkers with significant interaction terms.
+
+```{r assoc_cdx_adj_int, message=FALSE, warning=FALSE, echo=TRUE, results= 'asis', eval=TRUE}
+library(dplyr)
+library(purrr)
+library(broom)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(tidyr)
+library(gridExtra)
+library(emmeans)
+
+# Function to run single biomarker analysis with interactions
+run_biomarker_model <- function(data, biomarker, 
+                                main_predictor = "CDX_grouped",
+                                covariates = c("sex", "age_at_sample"),
+                                interactions = NULL,
+                                make_plots = TRUE) {
+  
+  # Helper function to wrap variable names in backticks if needed
+  protect_name <- function(name) {
+    if (grepl("[^a-zA-Z0-9_.]", name)) {
+      return(paste0("`", name, "`"))
+    }
+    return(name)
+  }
+  
+  # Prepare CDX grouping if needed
+  if (main_predictor == "CDX_grouped" && !"CDX_grouped" %in% names(data)) {
+    data <- data %>%
+      mutate(
+        CDX_grouped = case_when(
+          CDX %in% c("NCI", "Non - Cognitively Impaired", "Cognitively Normal") ~ "NCI",
+          CDX == "MCI" ~ "MCI",
+          CDX %in% c("AD", "Alzheimers Disease") ~ "AD",
+          TRUE ~ NA_character_
+        )
+      ) %>%
+      filter(!is.na(CDX_grouped)) %>%
+      mutate(CDX_grouped = factor(CDX_grouped, levels = c("NCI", "MCI", "AD")))
+  }
+  
+  # Filter for complete cases
+  required_vars <- c(biomarker, main_predictor, covariates)
+  if (!is.null(interactions)) {
+    # Extract variable names from interaction terms
+    interaction_vars <- unique(unlist(strsplit(interactions, ":")))
+    required_vars <- c(required_vars, interaction_vars)
+  }
+  required_vars <- unique(required_vars)
+  
+  model_data <- data %>%
+    select(all_of(required_vars)) %>%
+    filter(complete.cases(.))
+  
+  # Convert character variables to factors
+  for (var in required_vars) {
+    if (var != biomarker && is.character(model_data[[var]])) {
+      model_data[[var]] <- factor(model_data[[var]])
+    }
+  }
+  
+  # Build formula with protected names
+  protected_biomarker <- protect_name(biomarker)
+  protected_predictor <- protect_name(main_predictor)
+  protected_covariates <- sapply(covariates, protect_name)
+  
+  # Handle interactions
+  if (!is.null(interactions)) {
+    protected_interactions <- sapply(interactions, function(int) {
+      vars <- strsplit(int, ":")[[1]]
+      paste(sapply(vars, protect_name), collapse = ":")
+    })
+    formula_parts <- c(protected_predictor, protected_covariates, protected_interactions)
+  } else {
+    formula_parts <- c(protected_predictor, protected_covariates)
+  }
+  
+  formula_str <- paste(protected_biomarker, "~", paste(formula_parts, collapse = " + "))
+  
+  cat("\n### Analysis for", biomarker, "\n\n")
+  cat("**Formula:**", formula_str, "\n\n")
+  cat("**Sample size:**", nrow(model_data), "\n\n")
+  
+  # Fit model
+  lm_fit <- lm(as.formula(formula_str), data = model_data)
+  
+  # Print model summary
+  cat("\n#### Model Summary\n\n")
+  print(
+            summary(lm_fit)$coefficients %>%
+              as.data.frame() %>%
+              kbl(format = "html", digits = 4) %>%
+              kable_styling(
+                bootstrap_options = c("condensed"),
+                full_width = FALSE
+              )
+          )
+  cat("\n\n")
+  
+  # ANOVA table
+  cat("\n#### ANOVA Table\n\n")
+  aov_table <- anova(lm_fit)
+  print(
+    as.data.frame(aov_table) %>%
+      tibble::rownames_to_column("Term") %>%
+      kbl(format = "html", digits = 4) %>%
+      kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+      )
+  )
+  cat("\n\n")
+  
+  # Estimated marginal means for main predictor
+  if (main_predictor %in% names(model_data) && is.factor(model_data[[main_predictor]])) {
+    cat("\n#### Estimated Marginal Means for", main_predictor, "\n\n")
+    emm_formula <- as.formula(paste("~", protect_name(main_predictor)))
+    emm <- emmeans(lm_fit, emm_formula)
+    print(
+      as.data.frame(emm) %>%
+        kbl(format = "html", digits = 4) %>%
+        kable_styling(
+          bootstrap_options = c("condensed"),
+          full_width = FALSE
+        )
+    )
+    cat("\n\n")
+    
+    # Pairwise comparisons
+    cat("\n#### Pairwise Comparisons (Tukey-adjusted)\n\n")
+    pairs_result <- pairs(emm, adjust = "tukey")
+    print(
+      as.data.frame(pairs_result) %>%
+        select(contrast, estimate, SE, t.ratio, p.value) %>%
+        rename(Comparison = contrast, 
+               Estimate = estimate,
+               `t-statistic` = t.ratio,
+               `P-value` = p.value) %>%
+        kbl(format = "html", digits = 4) %>%
+        kable_styling(
+          bootstrap_options = c("condensed"),
+          full_width = FALSE
+        )
+    )
+    cat("\n\n")
+  }
+  
+  # Make plots if requested
+  if (make_plots) {
+    cat("\n#### Diagnostic Plots\n\n")
+    
+    # Diagnostic plots
+    # par(mfrow = c(2, 2))
+    # plot(lm_fit)
+    # par(mfrow = c(1, 1))
+    # cat("\n\n")
+    
+    # Main effect plot
+    if (main_predictor %in% names(model_data) && is.factor(model_data[[main_predictor]])) {
+      cat("\n#### Main Effect Plot\n\n")
+      
+      # Get adjusted means
+      emm_formula <- as.formula(paste("~", protect_name(main_predictor)))
+      emm <- emmeans(lm_fit, emm_formula)
+      emm_df <- as.data.frame(emm)
+      
+      # Raw data
+      raw_data <- model_data %>%
+        select(all_of(c(main_predictor, biomarker))) %>%
+        rename(predictor = all_of(main_predictor), value = all_of(biomarker))
+      
+      # Adjusted means
+      adj_means <- emm_df %>%
+        rename(predictor = all_of(main_predictor), 
+               value = emmean,
+               lower = lower.CL,
+               upper = upper.CL)
+      
+      p_main <- ggplot(raw_data, aes(x = predictor, y = value, fill = predictor)) +
+        geom_boxplot(alpha = 0.5, outlier.shape = 16, outlier.size = 1) +
+        geom_jitter(width = 0.2, alpha = 0.2, size = 0.8) +
+        geom_point(data = adj_means,
+                   aes(x = predictor, y = value),
+                   color = "red", shape = 18, size = 4, 
+                   position = position_nudge(x = 0.3)) +
+        geom_errorbar(data = adj_means,
+                      aes(x = predictor, ymin = lower, ymax = upper),
+                      color = "red", width = 0.15, linewidth = 0.8,
+                      position = position_nudge(x = 0.3)) +
+        theme_minimal() +
+        theme(legend.position = "none") +
+        labs(
+          title = paste(biomarker, "by", main_predictor),
+          subtitle = "Red diamonds show adjusted means Â± 95% CI",
+          x = main_predictor,
+          y = biomarker
+        )
+      
+      if (main_predictor == "CDX_grouped") {
+        p_main <- p_main +
+          scale_fill_manual(
+            values = c("NCI" = "#2ECC71", "MCI" = "#F39C12", "AD" = "#E74C3C")
+          )
+      }
+      
+      print(p_main)
+      cat("\n\n")
+    }
+
+# Add this section to the interaction plots part of run_biomarker_model
+# Replace the existing interaction plot code with this expanded version:
+
+# Interaction plots if interactions specified
+if (!is.null(interactions)) {
+  for (interaction in interactions) {
+    vars <- strsplit(interaction, ":")[[1]]
+    if (length(vars) == 2 && all(vars %in% names(model_data))) {
+      cat("\n#### Interaction Plot:", interaction, "\n\n")
+      
+      # Check if variables are factors or continuous
+      var1_is_factor <- is.factor(model_data[[vars[1]]])
+      var2_is_factor <- is.factor(model_data[[vars[2]]])
+      
+      # Case 1: Both factors
+      if (var1_is_factor && var2_is_factor) {
+        protected_vars <- sapply(vars, protect_name)
+        int_formula <- as.formula(paste("~", paste(protected_vars, collapse = "*")))
+        emm_int <- emmeans(lm_fit, int_formula)
+        emm_int_df <- as.data.frame(emm_int)
+        
+        names(emm_int_df)[names(emm_int_df) == vars[1]] <- "var1"
+        names(emm_int_df)[names(emm_int_df) == vars[2]] <- "var2"
+        
+        p_int <- ggplot(emm_int_df, aes(x = var1, y = emmean, 
+                                        color = var2, group = var2)) +
+          geom_line(linewidth = 1) +
+          geom_point(size = 3) +
+          geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), 
+                       width = 0.2, linewidth = 0.8) +
+          theme_minimal() +
+          labs(
+            title = paste("Interaction:", interaction),
+            x = vars[1],
+            y = paste("Adjusted Mean", biomarker),
+            color = vars[2]
+          )
+        
+        print(p_int)
+        cat("\n\n")
+      }
+      
+      # Case 2: One factor, one continuous (plot separate regression lines)
+      else if (var1_is_factor || var2_is_factor) {
+        # Determine which is factor and which is continuous
+        if (var1_is_factor) {
+          factor_var <- vars[1]
+          cont_var <- vars[2]
+        } else {
+          factor_var <- vars[2]
+          cont_var <- vars[1]
+        }
+        
+        # Create prediction data
+        cont_range <- seq(min(model_data[[cont_var]], na.rm = TRUE),
+                         max(model_data[[cont_var]], na.rm = TRUE),
+                         length.out = 100)
+        
+        pred_data_list <- list()
+        for (level in levels(model_data[[factor_var]])) {
+          pred_df <- data.frame(
+            cont_value = cont_range,
+            factor_level = level
+          )
+          names(pred_df) <- c(cont_var, factor_var)
+          
+          # Add other covariates at their means
+          for (cov in covariates) {
+            if (cov != cont_var && cov != factor_var) {
+              if (is.numeric(model_data[[cov]])) {
+                pred_df[[cov]] <- mean(model_data[[cov]], na.rm = TRUE)
+              } else if (is.factor(model_data[[cov]])) {
+                pred_df[[cov]] <- levels(model_data[[cov]])[1]
+              }
+            }
+          }
+          
+          # Get predictions
+          pred_df$fit <- predict(lm_fit, newdata = pred_df)
+          pred_df$se <- predict(lm_fit, newdata = pred_df, se.fit = TRUE)$se.fit
+          pred_df$lower <- pred_df$fit - 1.96 * pred_df$se
+          pred_df$upper <- pred_df$fit + 1.96 * pred_df$se
+          
+          pred_data_list[[level]] <- pred_df
+        }
+        
+        pred_data <- bind_rows(pred_data_list)
+        
+        # Plot
+        p_int <- ggplot(pred_data, aes(x = .data[[cont_var]], y = fit, 
+                                       color = .data[[factor_var]], 
+                                       fill = .data[[factor_var]])) +
+          geom_line(linewidth = 1) +
+          geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, color = NA) +
+          geom_point(data = model_data, 
+                    aes(x = .data[[cont_var]], y = .data[[biomarker]], 
+                        color = .data[[factor_var]]),
+                    alpha = 0.3, size = 1) +
+          theme_minimal() +
+          labs(
+            title = paste("Interaction:", interaction),
+            x = cont_var,
+            y = biomarker,
+            color = factor_var,
+            fill = factor_var
+          )
+        
+        if (factor_var == "CDX_grouped") {
+          p_int <- p_int +
+            scale_color_manual(
+              values = c("NCI" = "#2ECC71", "MCI" = "#F39C12", "AD" = "#E74C3C")
+            ) +
+            scale_fill_manual(
+              values = c("NCI" = "#2ECC71", "MCI" = "#F39C12", "AD" = "#E74C3C")
+            )
+        }
+        
+        print(p_int)
+        cat("\n\n")
+      }
+      
+      # Case 3: Both continuous (contour plot or interaction at specific values)
+      else {
+        cat("**Interaction effect at representative values of", vars[2], ":**\n\n")
+        
+        # Show slopes at different levels of the second variable
+        cont2_values <- quantile(model_data[[vars[2]]], 
+                                probs = c(0.1, 0.5, 0.9), na.rm = TRUE)
+        
+        pred_data_list <- list()
+        for (i in seq_along(cont2_values)) {
+          cont1_range <- seq(min(model_data[[vars[1]]], na.rm = TRUE),
+                           max(model_data[[vars[1]]], na.rm = TRUE),
+                           length.out = 100)
+          
+          pred_df <- data.frame(
+            cont1_value = cont1_range,
+            cont2_value = cont2_values[i],
+            level_name = paste0(names(cont2_values)[i], " (", 
+                              round(cont2_values[i], 2), ")")
+          )
+          names(pred_df)[1:2] <- vars
+          
+          # Add other covariates at their means
+          for (cov in covariates) {
+            if (!cov %in% vars) {
+              if (is.numeric(model_data[[cov]])) {
+                pred_df[[cov]] <- mean(model_data[[cov]], na.rm = TRUE)
+              } else if (is.factor(model_data[[cov]])) {
+                pred_df[[cov]] <- levels(model_data[[cov]])[1]
+              }
+            }
+          }
+          
+          pred_df$fit <- predict(lm_fit, newdata = pred_df)
+          pred_data_list[[i]] <- pred_df
+        }
+        
+        pred_data <- bind_rows(pred_data_list)
+        
+        p_int <- ggplot(pred_data, aes(x = .data[[vars[1]]], y = fit, 
+                                       color = level_name)) +
+          geom_line(linewidth = 1) +
+          theme_minimal() +
+          labs(
+            title = paste("Interaction:", interaction),
+            subtitle = paste("Lines show relationship at 10th, 50th, and 90th percentiles of", vars[2]),
+            x = vars[1],
+            y = paste("Predicted", biomarker),
+            color = vars[2]
+          )
+        
+        print(p_int)
+        cat("\n\n")
+      }
+    }
+  }
+}
+  }
+  
+  # Return model object invisibly
+  return(invisible(lm_fit))
+}
+
+# meta_plus <- meta_plus %>%
+#   mutate(Race_Ethnicity = paste(Race, Ethnicity, sep = "_"))
+# meta_plus_race <- meta_plus %>%
+#     filter(Race_Ethnicity %in% c("BL_NH", "BL_HI","WH_HI", "MU_HI")) %>%
+#     mutate(Race_Ethnicity = factor(Race_Ethnicity, levels = c("BL_NH", "BL_HI","WH_HI", "MU_HI")))
+
+#mci_list=c("pTau-217", "BD-pTau-181","pTau-231", "pTau-181","CHI3L1", "MAPT", "TAFA5","TREM1", "NEFL","GFAP", "AGRN")
+#ad_list=c("ACHE", "NPTX1", "BACE1","CCL13","CCL11","CST3", "AÅ’â‰¤40","VCAM1", "FCN2")
+
+#sig_biomarker_names <- main_sig %>% pull(Biomarker) %>% unique()
+
+# Helper function to check if covariate is variable
+is_variable <- function(data, var) {
+  if (!var %in% names(data)) return(FALSE)
+  n_unique <- length(unique(na.omit(data[[var]])))
+  return(n_unique > 1)
+}
+
+# Define datasets and their available covariates
+datasets <- list(
+  list(name = "ALL DATA", 
+       data = meta_plus_filtered,
+       covariates = c("sex", "age_at_sample", "Race_Ethnicity"),
+       test_interactions = c("age_at_sample", "Race_Ethnicity", "sex")),
+  
+  list(name = "HISPANIC", 
+       data = meta_plus_filtered_HI,
+       covariates = c("sex", "age_at_sample", "Race_Ethnicity"),
+       test_interactions = c("age_at_sample", "Race_Ethnicity", "sex")),
+  
+  list(name = "BLACK", 
+       data = meta_plus_filtered_BL,
+       covariates = c("sex", "age_at_sample", "Race_Ethnicity"),
+       test_interactions = c("age_at_sample", "sex", "Race_Ethnicity")),
+  
+  list(name = "AA", 
+       data = meta_plus_filtered_AA,
+       covariates = c("sex", "age_at_sample"),
+       test_interactions = c("age_at_sample", "sex")),
+  
+  list(name = "BLACK_FEMALES", 
+       data = meta_plus_filtered_BL%>%filter(sex %in% c("F")),
+       covariates = c("age_at_sample", "Race_Ethnicity"),
+       test_interactions = c("age_at_sample", "Race_Ethnicity")),
+  
+  list(name = "ALL_FEMALES", 
+       data = meta_plus_filtered%>%filter(sex %in% c("F")),
+       covariates = c("age_at_sample", "Race_Ethnicity"),
+       test_interactions = c("age_at_sample", "Race_Ethnicity"))
+)
+
+sig_biomarker_names <- c("CCL3")  # Can be a vector
+
+# Loop through each dataset
+for (ds in datasets) {
+  cat("\n## ", ds$name, "\n\n")
+  
+  # Check which covariates are actually variable in this dataset
+  variable_covs <- ds$covariates[sapply(ds$covariates, function(cov) {
+    is_variable(ds$data, cov)
+  })]
+  
+  if (length(variable_covs) == 0) {
+    cat("*No variable covariates found - skipping this dataset*\n\n")
+    next
+  }
+  
+  cat("**Using covariates:**", paste(variable_covs, collapse = ", "), "\n\n")
+  
+  # Test each interaction type
+  for (int_var in ds$test_interactions) {
+    # Skip if interaction variable not in variable covariates
+    if (!int_var %in% variable_covs) {
+      cat("*Skipping", int_var, "interaction - not variable in this subset*\n\n")
+      next
+    }
+    
+    cat("\n### Interactions with", int_var, "\n\n")
+    
+    for (b in sig_biomarker_names) {
+      run_biomarker_model(
+        ds$data, 
+        biomarker = b,
+        covariates = variable_covs,
+        interactions = paste0("CDX_grouped:", int_var)
+      )
+    }
+  }
+  
+  cat("\n---\n\n")
+}
+```
+
+# F. Notes
+
+**Newest notes on top**
+
+* Looking at association tests, most are as expected.
+* CCL3 is sig for MCI but not AD in Blacks and in AA.This is one that looks polymorphic.
+  * It also doesn't seem significant until we adjust for age and sex.
+  * High values are rare in Whites and more freq in AA according to univariate analyses. Not associated with age in overall sample (p=0.012). More associated with age in Blacks (p=0.0006).
+  * Looking just at Black females (because few AFDC MCI males), the NCIs are where the differences are: AA are sig lower than AFDC, then levels go up, converge and plateau to AD. And the Hispanics are all sig below with no diff with disease.
+  * Could this be an age effect somehow? Does whether protein levels change or not depend on whether the polymorphism is present?
+
+* There are 23 samples repeated, mostly HI from NY. All seem to be at the same time. I really need to take them out before association analysis.
+* Note outlier samples that overlap
+* This has two different alliquots. Check for others.
+  * FCN2	2.099459	202313279-06	AD	66.7	New York United States
+  * FCN2	1.172242	202313279-23	AD	66.7	New York United States
+* 202514780-11 is an outlier for FCN2 abd CCL11 in opposite directions.
+
+* These two are outliers in FABP3, AGRN and TAFA5
+TAFA5	17.78030	202423789-41	AD	59.4	Florida United States
+TAFA5	17.36069	202421855-31	MCI	74.7	Ohio United States
+
+* 202317493-06 is out in FABP3, AGRN and NEFL
+* 202415615-40 is out in AGRN, IL15, CD63
+* Plus more...
+
+_________________________________________________________________________________
+* For interactions with sex, look at CCL13, CH3L1, TAFA5, NEFL, GFAP, FCN2. 
+  * Some are different between male and female controls, coming together in AD. 
+  * Some are similar in male and female controls and have a more dramatic increase in one sex.
+  
+* For Race_Ethnicity, look at BACE1, CCL13, CCL11, AB40, pTau-217, BD-pTau181, pTau231, pTau181, CH3L1
+  * BACE1, CH3L1 and AB40 are the only ones with significant ANOVA 6df interaction effects.
+    * BACE1 only sig in BL-HI. The AD group is much higher than NCI or MCI.
+    * AB40 is sig in BL_HI and MU_HI, and even shows an increase from MCI to AD in BL_HI
+    * CH3L1 shows linear increase from NCI to MCI to AD in BL_HI. The MU_HI show an increase but only for AD
+  * For some, means only differ by race in AD.
+  * For others, effects are seen in one or two races but not others.
+* NOTE THAT BL_HI MALES ARE A VERY SMALL GROUP. TRY SOME OF THESE IN FEMALES ONLY, LIKE CH3L1. In general, BL_HI is a pretty small group. We could try some anlyses without them.
+
+* For interactions with age, look at CCL11, AB40, FCN2, pTau-217, BD-pTau-181. 
+  * None have sig Age interactions for the ANOVA term
+  * For some, the controls at a low age are different when young, but similar when older, even though they are still controls.
+  * For pTau-217 and BD-pTau-181 and kind of other Tau's, it's interesting that the MCI are similar to NCI at a young age, but diverge when older.
+  * And some, like GFAP, start lower and remain lower in controls and MCIs.
+* Do any of these distinguish MCI from NCI at an early age?  NEFL a bit.
+
+* After removing BL-HI, looking at the ANOVA group int term.
+  * Age ints: CCL11 (p=0.09), NPTX1 (0.10), MSLN1 (0.049), FCN2 (0.079), KLK6 (0.035)
+    Check if they came up with BL-HI when I ran all the sig markers. Yes results were similar.
+  * Race/Eth ints: CH3L1 (0.175), IGF1R (0.071), TAFA5 (0.15), AB40 (0.0355), MSLN(0.1167), KLK6 (0.0213)
+  * Sex ints (p<0.05 for group term): GFAP, FCN2, VSNL1, KLK6
+  * Sex ints (p<0.05 with either MCI or AD term): pTau217, NEFL, CCL13
+  **KLK6 has sig int with everything. Need to look more closely at this**
+
+*For interesting interactions, may also want to include those with either MCI or AD int effect in addition to grouped CDX. MCIs may was out sig AD ints.
+
+---------------------------------------------------------------------
+
+* NPY racial frequency and direction are not inconsistent with this SNP:
+https://www.ncbi.nlm.nih.gov/snp/rs16147
+
+* The distribution of CCL3 in the Black vs other groups is consistent with Hap-A1, which has freq ~13% in African pops (HIV protective in utero). The haplotype includes a SNP in the promoter region and is assoc with higher protein. I can not find rs#. It may be pop-specific.
+
+* CHIT1 has a 24-bp duplication in exon 10 (rs150192398). This duplication activates a cryptic splice site, leading to an abnormally spliced mRNA and a protein that lacks 29 amino acids, making it enzymatically inactive. 
+  *  Individuals who are homozygous for this duplication (meaning they inherited two copies of the mutant gene) have a complete loss of functional CHIT1 enzyme activity. 
+  * Heterozygous individuals have significantly lower activity than those with the wild-type gene (no duplication), showing a gene dosage effect.
+  * The dup is common in Asians (56%), EU (17%) and AF (7%)
+
+* GDF15. rs1058587	Missense (H6D variant) is associated with lower circulating GDF15 levels.
+  * The G allele results in an assay interference that makes standard tests show lower levels, and potentially results in lower bioactive protein overall.	
+  * ~25% in Asians, followed by EU and then AA (7-15%). 
+  * Carriers of the G allele have much lower risk of severe pregnancy nausea.
+  * There are other polymorphisms too.
+  
+* Look at Group 2 for MCI discrimination, e.g. pTau-217 and CHI3L1 and TREM1. Also NEFL in Group 4
+
+* Need to think about disease duration. we could start by seeing if any biomarkers are assoc with duration in cases only.
+  
+* **Other things to do:**
+  * look at lods for these
+  * look for Run/Bay effects
+  * pull in ALZ2. Covariates are for both sets I think.
+  * adjust for demographics 
+  * look at correlations among covariates
+  * look for covariate differences among Runs/Bays

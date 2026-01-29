@@ -1,0 +1,1506 @@
+---
+title: "Replicates Analysis for QC of Biomarker Data for ALZ123"
+author: "ERM"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+---
+# A. Overview
+
+This protocol describes a workflow for analysis of the replicate and control samples (HIHG replicates, SC, IPC, NC) for QC purposes. Goals to identify problems with NC or IPCs and any problem plates or batch effects.
+
+Look at CVs within plates, within Runs and overall
+
+12/23/2025 This version corrects the CV calculation to work with the ratio before taking log2 for the NPQ.
+
+**For a new QC run, change title in YAML, NPQ input file name and this RMarkdown file name (where .html output will go)**
+
+
+## A.1 Input Data
+
+**You must specify the input NPQ filename below in section A.3**
+
+* Example: NPQ_data <- "NPQ_20250923.csv" 
+
+**Required Input Data Files:** Place all files in a folder called `input_files` in the working directory.
+
+1. **Biomarker NPQ data** (`NPQ_xxxxxxxx.csv`) – Rows: biomarkers; Columns: samples; downloaded from NAS. Assign the filename to the variable `NPQ_data` below.
+2. **Raw count data** (`Raw_counts.csv`) – Rows: biomarkers; Columns: samples; exported from NPQ_Values.xlsx.
+3. **Replicate list** (`Replicate_list.csv`) – List of HIHG-replicate sample IDs for assay precision checks. Created by analyst.
+
+
+**Output Data Files:** 
+
+1. RMarkdown html file – named after this file. Saved in working directory.
+
+
+
+## A.2 Thresholds
+
+Adjustable QC parameters include:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+cv_threshold = 20
+
+## A.3 Initial Setup 
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+# Input NPQ filename
+
+NPQ_data <- "NPQ_20251220.csv" #SPECIFY THE FILE NAME CONTAINING NPQ DATA
+
+cv_threshold = 25
+
+```
+---
+  
+# B. Data Formatting
+This section formats the data and produces initial summaries.
+
+## B.1 Get Data 
+Input file is: `r NPQ_data`
+
+```{r load-and-format, message=FALSE, warning=FALSE, echo=TRUE}
+library(tidyverse)
+
+# --- Load NPQ data & reshape ----------------------------------------------
+combined_df <- read_csv(
+  file.path("input_files", NPQ_data),
+  show_col_types = FALSE
+) %>%
+  rename(Biomarker = 1) %>%            # first column = biomarker names
+  pivot_longer(-Biomarker, names_to = "SampleID", values_to = "Value") %>%
+  pivot_wider(names_from = Biomarker, values_from = Value)
+
+# --- Load QC metadata ------------------------------------------------------
+meta_df <- read_csv(
+  "input_files/Sample_QC.csv",
+  skip = 12,
+  show_col_types = FALSE
+) %>%
+  mutate(
+    Run = str_extract(plateID, "^[0-9]{8}-[0-9]{4}"),
+    Bay = str_extract(plateID, "Bay[0-9]+")
+  ) %>%
+  transmute(SampleID = `Sample Name`, Run, Bay)
+
+# --- Attach metadata -------------------------------------------------------
+combined_df <- combined_df %>%
+  inner_join(meta_df, by = "SampleID") %>%
+  relocate(SampleID, Run, Bay)
+
+# --- Load raw counts & standardize format ---------------------------------
+raw_df <- read_csv("input_files/Raw_counts.csv", show_col_types = FALSE) %>%
+  rename(Biomarker = 1) %>%
+  pivot_longer(-Biomarker, names_to = "SampleID", values_to = "Raw") %>%
+  pivot_wider(names_from = Biomarker, values_from = Raw) %>%
+  inner_join(meta_df, by = "SampleID") %>%
+  relocate(SampleID, Run, Bay)
+```
+  
+
+## B.2 Pull Reps and Controls
+Pull out Alamar control and HIHG replicate samples (NPQs and Reads)
+
+```{r pull_samples, message=FALSE, warning=FALSE, echo=TRUE}
+# ==============================================================================
+# B.2 PULL REPS AND CONTROLS
+# ==============================================================================
+
+library(dplyr)
+library(tidyr)
+
+# --- Read HIHG replicate list ---
+rep <- read_csv("input_files/Replicate_list.csv", show_col_types = FALSE)
+
+# --- EXTRACT REPS (Wide format) ---
+# NPQs
+nc_samples_npq   <- combined_df[grepl("^NC", combined_df$SampleID), ]
+sc_samples_npq   <- combined_df[grepl("^SC", combined_df$SampleID), ]
+ipc_samples_npq  <- combined_df[grepl("^IPC", combined_df$SampleID), ]
+hihg_reps_npq    <- combined_df[combined_df$SampleID %in% rep[[1]], ]
+
+# Raw reads
+nc_samples_reads   <- raw_df[grepl("^NC", raw_df$SampleID), ]
+sc_samples_reads   <- raw_df[grepl("^SC", raw_df$SampleID), ]
+ipc_samples_reads  <- raw_df[grepl("^IPC", raw_df$SampleID), ]
+hihg_reps_reads    <- raw_df[raw_df$SampleID %in% rep[[1]], ]
+
+# --- GET ALL REP SAMPLE IDS ---
+rep_sample_ids <- unique(c(
+  nc_samples_npq$SampleID,
+  ipc_samples_npq$SampleID,
+  sc_samples_npq$SampleID,
+  hihg_reps_npq$SampleID
+))
+
+# --- CONVERT TO 2^NPQ FOR CV CALCULATIONS ---
+nc_samples   <- nc_samples_npq %>% mutate(across(where(is.numeric), ~ 2^.x))
+sc_samples   <- sc_samples_npq %>% mutate(across(where(is.numeric), ~ 2^.x))
+ipc_samples  <- ipc_samples_npq %>% mutate(across(where(is.numeric), ~ 2^.x))
+hihg_reps    <- hihg_reps_npq %>% mutate(across(where(is.numeric), ~ 2^.x))
+
+# --- SUMMARY TABLE ---
+summarize_counts <- function(df, type_name) {
+  df %>%
+    group_by(Run, Bay) %>%
+    summarise(!!type_name := n(), .groups = "drop")
+}
+
+control_summary <- full_join(
+  summarize_counts(nc_samples, "NC"),
+  summarize_counts(ipc_samples, "IPC"),
+  by = c("Run","Bay")
+) %>%
+  full_join(summarize_counts(sc_samples, "SC"), by = c("Run","Bay")) %>%
+  full_join(summarize_counts(hihg_reps, "HIHG_Replicate"), by = c("Run","Bay")) %>%
+  replace_na(list(NC = 0, IPC = 0, SC = 0, HIHG_Replicate = 0)) %>%
+  arrange(Run, Bay)
+
+print(as.data.frame(control_summary))
+
+# --- WRITE OUTPUT FILES ---
+write_csv(hihg_reps_npq, "output_files/hihg_reps_NPQ.csv")
+write_csv(sc_samples_npq, "output_files/sc_reps_NPQ.csv")
+write_csv(nc_samples_npq, "output_files/nc_reps_NPQ.csv")
+write_csv(ipc_samples_npq, "output_files/ipc_reps_NPQ.csv")
+write_csv(hihg_reps_reads, "output_files/hihg_reps_READS.csv")
+write_csv(sc_samples_reads, "output_files/sc_reps_READS.csv")
+write_csv(nc_samples_reads, "output_files/nc_reps_READS.csv")
+write_csv(ipc_samples_reads, "output_files/ipc_reps_READS.csv")
+
+```
+ 
+
+# C. Analysis
+
+## C.1 Coefficient of Variation
+Compute CVs for each biomarker comparing replicates at different levels (within Plates, within Runs and within Bays). CVs are already on the % scale. Bad CVs would be ~ >20.
+
+Alamar excludes values below LOD from CV calculations. I did not exclude anything.
+
+I need to change NPQ to 2^NPQ
+
+In general, the largest CV's for raw reads for each of the rep types are in Run 0804 when we collapse over Bays. Below we see how this makes sense for mCherry because the reads have so much variability over bays in that run.
+
+```{r biomarker-cv, message=FALSE, warning=FALSE, echo=TRUE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+
+cv_plots <- function(df, top_n = 10, cv_threshold = 25){
+
+  # Long format
+  df_long <- df %>%
+    pivot_longer(
+      cols = -c(SampleID, Run, Bay),
+      names_to = "Biomarker",
+      values_to = "Value"
+    )
+
+  # CV per Plate (Run × Bay)
+  cv_by_run_bay <- df_long %>%
+    group_by(Run, Bay, Biomarker) %>%
+    summarize(
+      n    = n(),
+      mean = mean(Value, na.rm = TRUE),
+      sd   = sd(Value, na.rm = TRUE),
+      CV   = 100 * sd / mean,
+      .groups = "drop"
+    )
+
+  # CV per Run
+  cv_by_run <- df_long %>%
+    group_by(Run, Biomarker) %>%
+    summarize(
+      n    = n(),
+      mean = mean(Value, na.rm = TRUE),
+      sd   = sd(Value, na.rm = TRUE),
+      CV_run   = 100 * sd / mean,
+      .groups = "drop"
+    )
+
+  # CV per Bay
+  cv_by_bay <- df_long %>%
+    group_by(Bay, Biomarker) %>%
+    summarize(
+      n    = n(),
+      mean = mean(Value, na.rm = TRUE),
+      sd   = sd(Value, na.rm = TRUE),
+      CV_bay   = 100 * sd / mean,
+      .groups = "drop"
+    )
+
+  # CV overall (all data)
+cv_overall <- df_long %>%
+  group_by(Biomarker) %>%
+  summarize(
+    mean = mean(Value, na.rm = TRUE),
+    sd   = sd(Value, na.rm = TRUE),
+    CV_overall = 100 * sd / mean,
+    .groups = "drop"
+  )
+
+  # ---- HIGH CV TRACKING ----
+  # Plate level
+  high_cv_plate <- cv_by_run_bay %>%
+    filter(CV > cv_threshold) %>%
+    mutate(Level = "Plate",
+           Location = paste0(Run, "_", Bay)) %>%
+    select(Biomarker, Level, Location, CV, n, mean, sd)
+  
+  # Run level
+  high_cv_run <- cv_by_run %>%
+    filter(CV_run > cv_threshold) %>%
+    mutate(Level = "Run",
+           Location = Run,
+           CV = CV_run) %>%
+    select(Biomarker, Level, Location, CV, n, mean, sd)
+  
+  # Bay level
+  high_cv_bay <- cv_by_bay %>%
+    filter(CV_bay > cv_threshold) %>%
+    mutate(Level = "Bay",
+           Location = Bay,
+           CV = CV_bay) %>%
+    select(Biomarker, Level, Location, CV, n, mean, sd)
+  
+  # Overall level
+  high_cv_overall <- cv_overall %>%
+    filter(CV_overall > cv_threshold) %>%
+    mutate(Level = "Overall",
+           Location = "All",
+           CV = CV_overall,
+           n = NA_integer_) %>%
+    select(Biomarker, Level, Location, CV, n, mean, sd)
+  
+  # Combine all high CV instances
+  high_cv_all <- bind_rows(
+    high_cv_plate,
+    high_cv_run,
+    high_cv_bay,
+    high_cv_overall
+  ) %>%
+    arrange(Biomarker, Level, desc(CV))
+  
+ # Summary: unique biomarkers with high CV at any level
+high_cv_biomarkers <- high_cv_all %>%
+  group_by(Biomarker) %>%
+  summarize(
+    n_instances = n(),
+    max_CV = max(CV, na.rm = TRUE),
+    levels_affected = paste(unique(Level), collapse = ", "),
+    worst_location = Location[which.max(CV)],
+    .groups = "drop"
+  ) %>%
+  arrange(desc(max_CV))
+  
+  # Top worst biomarkers for each category
+  top_plate   <- cv_by_run_bay %>% group_by(Biomarker) %>% summarize(max_CV = max(CV, na.rm = TRUE), .groups = "drop") %>% slice_max(max_CV, n = top_n) %>% pull(Biomarker)
+  top_run     <- cv_by_run %>% group_by(Biomarker) %>% summarize(max_CV = max(CV_run, na.rm = TRUE), .groups = "drop") %>% slice_max(max_CV, n = top_n) %>% pull(Biomarker)
+  top_bay     <- cv_by_bay %>% group_by(Biomarker) %>% summarize(max_CV = max(CV_bay, na.rm = TRUE), .groups = "drop") %>% slice_max(max_CV, n = top_n) %>% pull(Biomarker)
+  top_overall <- cv_overall %>% slice_max(CV_overall, n = top_n) %>% pull(Biomarker)
+
+  # Wide tables for Markdown
+  plate_table <- cv_by_run_bay %>%
+    filter(Biomarker %in% top_plate) %>%
+    mutate(Biomarker = factor(Biomarker, levels = top_plate)) %>%
+    arrange(Biomarker) %>%
+    mutate(Run_Bay = paste0(Run, "_", Bay)) %>%
+    select(Biomarker, Run_Bay, CV) %>%
+    distinct(Biomarker, Run_Bay, .keep_all = TRUE) %>%
+    pivot_wider(names_from = Run_Bay, values_from = CV)
+
+  run_table <- cv_by_run %>%
+    filter(Biomarker %in% top_run) %>%
+    mutate(Biomarker = factor(Biomarker, levels = top_run)) %>%
+    arrange(Biomarker) %>%
+    select(Biomarker, Run, CV_run) %>%
+    distinct(Biomarker, Run, .keep_all = TRUE) %>%
+    pivot_wider(names_from = Run, values_from = CV_run)
+
+  bay_table <- cv_by_bay %>%
+    filter(Biomarker %in% top_bay) %>%
+    mutate(
+      Biomarker = factor(Biomarker, levels = top_bay),
+      stat_string = sprintf(
+        "CV=%.1f%%; mean=%.1f; sd=%.1f",
+        CV_bay, mean, sd
+      )
+    ) %>%
+    arrange(Biomarker) %>%
+    select(Biomarker, Bay, stat_string) %>%
+    distinct(Biomarker, Bay, .keep_all = TRUE) %>%
+    pivot_wider(
+      names_from = Bay,
+      values_from = stat_string
+    )
+
+  overall_table <- cv_overall %>%
+  filter(Biomarker %in% top_overall) %>%
+  mutate(
+    Biomarker = factor(Biomarker, levels = top_overall)
+  ) %>%
+  arrange(Biomarker) %>%
+  select(Biomarker, CV_overall, mean, sd)  # MODIFY THIS LINE
+  
+  # Plots
+  plot_plate <- ggplot(cv_by_run_bay, aes(x = Bay, y = CV)) +
+    geom_boxplot() +
+    geom_hline(yintercept = cv_threshold, linetype = "dashed", color = "red", alpha = 0.7) +
+    facet_wrap(~ Run) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 1)
+    ) +
+    labs(title = "Per-plate CV by Bay and Run", x = "Bay", y = "CV (%)",
+         caption = paste0("Each point represents one Plate (Run × Bay × Biomarker). Red line = CV threshold (", cv_threshold, "%)."))
+
+  plot_run <- ggplot(cv_by_run, aes(x = Run, y = CV_run)) +
+    geom_boxplot() +
+    geom_hline(yintercept = cv_threshold, linetype = "dashed", color = "red", alpha = 0.7) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 1)
+    ) +
+    labs(title = "CV per Run over Bays", x = "Run", y = "CV (%)",
+         caption = paste0("CV per biomarker across Bays within each Run. Red line = CV threshold (", cv_threshold, "%)."))
+
+  plot_bay <- ggplot(cv_by_bay, aes(x = Bay, y = CV_bay)) +
+    geom_boxplot() +
+    geom_hline(yintercept = cv_threshold, linetype = "dashed", color = "red", alpha = 0.7) +
+    theme_bw() +
+    labs(title = "CV per Bay over Runs", x = "Bay", y = "CV (%)",
+         caption = paste0("CV per biomarker across Runs within each Bay. Red line = CV threshold (", cv_threshold, "%)."))
+
+  plot_overall <- ggplot(cv_overall, aes(x = "", y = CV_overall)) +
+    geom_boxplot() +
+    geom_hline(yintercept = cv_threshold, linetype = "dashed", color = "red", alpha = 0.7) +
+    theme_bw() +
+    labs(title = "Overall CV Across All Plates", x = "", y = "CV (%)",
+         caption = paste0("CV for each biomarker across all Runs and Bays. Red line = CV threshold (", cv_threshold, "%)."))
+
+  # Captions for tables
+  plate_table_caption   <- "Top plate-level CV biomarkers (worst CVs across Run × Bay)."
+  run_table_caption     <- "Top CV biomarkers per Run."
+  bay_table_caption     <- "Top CV biomarkers per Bay."
+  overall_table_caption <- "Top overall CV biomarkers across all data."
+
+  # Return
+  return(list(
+    plots = list(
+      plate   = plot_plate,
+      run     = plot_run,
+      bay     = plot_bay,
+      overall = plot_overall
+    ),
+    tables = list(
+      plate   = list(data = plate_table, caption = plate_table_caption),
+      run     = list(data = run_table, caption = run_table_caption),
+      bay     = list(data = bay_table, caption = bay_table_caption),
+      overall = list(data = overall_table, caption = overall_table_caption)
+    ),
+    cv_by_run_bay = cv_by_run_bay,
+    cv_overall = cv_overall,
+    high_cv = list(
+      all_instances = high_cv_all,
+      summary = high_cv_biomarkers,
+      threshold = cv_threshold
+    )
+  ))
+}
+```
+
+### C.1.1 Inter-plate Control Samples (IPC)
+3 per plate
+
+
+```{r ipc_cv, message=FALSE, warning=FALSE, echo=TRUE, eval=FALSE}
+res <- cv_plots(ipc_samples_reads, top_n = 10)
+
+# Plots
+res$plots$plate
+knitr::kable(res$tables$plate$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::add_header_above(c(" " = 1, "Run × Bay Plates" = ncol(res$tables$plate$data) - 1)) %>%
+  kableExtra::footnote(res$tables$plate$caption)
+
+res$plots$run
+knitr::kable(res$tables$run$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$run$caption)
+
+res$plots$bay
+knitr::kable(res$tables$bay$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$bay$caption)
+
+res$plots$overall
+knitr::kable(res$tables$overall$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$overall$caption)
+```
+
+#### NPQ
+
+```{r ipc_cv_npq, message=FALSE, warning=FALSE, echo=TRUE}
+
+res <- cv_plots(ipc_samples, top_n = 10)
+
+# Plots
+res$plots$plate
+knitr::kable(res$tables$plate$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::add_header_above(c(" " = 1, "Run × Bay Plates" = ncol(res$tables$plate$data) - 1)) %>%
+  kableExtra::footnote(res$tables$plate$caption)
+
+res$plots$run
+knitr::kable(res$tables$run$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$run$caption)
+
+res$plots$bay
+knitr::kable(res$tables$bay$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$bay$caption)
+
+res$plots$overall
+knitr::kable(res$tables$overall$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$overall$caption)
+
+
+# Calculate raw read stats
+raw_stats <- ipc_samples_reads %>%
+  pivot_longer(cols = -c(SampleID, Run, Bay), 
+               names_to = "Biomarker", 
+               values_to = "Value") %>%
+  group_by(Biomarker) %>%
+  summarize(
+    reads_mean = mean(Value, na.rm = TRUE),
+    reads_min = min(Value, na.rm = TRUE),
+    reads_max = max(Value, na.rm = TRUE),
+    .groups = "drop"
+  )
+# Summary
+ipc_hi <- res$high_cv$summary %>%
+  left_join(raw_stats, by = "Biomarker")
+
+```
+
+C.1.2 Negative Controls (NC)
+4 per plate
+
+Excluding NCs from this evaluation because CVs are not so useful here. We can pull the back in below to look at specifica examples.
+
+
+NaN happens if the mean is 0 (which means the var is also 0). 200 is the max when exactly one NC is 1 and the others are 0. CVs may not be appropriate for very low counts.
+
+```{r nc_cv, message=FALSE, warning=FALSE, echo=TRUE, eval=FALSE}
+res <- cv_plots(nc_samples_reads, top_n = 10)
+
+# Plots
+res$plots$plate
+knitr::kable(res$tables$plate$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::add_header_above(c(" " = 1, "Run × Bay Plates" = ncol(res$tables$plate$data) - 1)) %>%
+  kableExtra::footnote(res$tables$plate$caption)
+
+res$plots$run
+knitr::kable(res$tables$run$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$run$caption)
+
+res$plots$bay
+knitr::kable(res$tables$bay$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$bay$caption)
+
+res$plots$overall
+knitr::kable(res$tables$overall$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$overall$caption)
+```
+
+ NPQ
+
+```{r nc_cv_npq, message=FALSE, warning=FALSE, echo=TRUE,eval=FALSE}
+
+res <- cv_plots(nc_samples, top_n = 10)
+
+# Plots
+res$plots$plate
+knitr::kable(res$tables$plate$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::add_header_above(c(" " = 1, "Run × Bay Plates" = ncol(res$tables$plate$data) - 1)) %>%
+  kableExtra::footnote(res$tables$plate$caption)
+
+res$plots$run
+knitr::kable(res$tables$run$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$run$caption)
+
+res$plots$bay
+knitr::kable(res$tables$bay$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$bay$caption)
+
+res$plots$overall
+knitr::kable(res$tables$overall$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$overall$caption)
+```
+
+### C.1.3 Sample Controls (SC)
+3 per plate
+
+
+```{r sc_cv, message=FALSE, warning=FALSE, echo=TRUE, eval=FALSE}
+
+res <- cv_plots(sc_samples_reads, top_n = 10)
+
+# Plots
+res$plots$plate
+knitr::kable(res$tables$plate$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::add_header_above(c(" " = 1, "Run × Bay Plates" = ncol(res$tables$plate$data) - 1)) %>%
+  kableExtra::footnote(res$tables$plate$caption)
+
+res$plots$run
+knitr::kable(res$tables$run$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$run$caption)
+
+res$plots$bay
+knitr::kable(res$tables$bay$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$bay$caption)
+
+res$plots$overall
+knitr::kable(res$tables$overall$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$overall$caption)
+
+
+```
+
+#### NPQ
+
+```{r sc_cv_npq, message=FALSE, warning=FALSE, echo=TRUE}
+res <- cv_plots(sc_samples, top_n = 10)
+
+# Plots
+res$plots$plate
+knitr::kable(res$tables$plate$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::add_header_above(c(" " = 1, "Run × Bay Plates" = ncol(res$tables$plate$data) - 1)) %>%
+  kableExtra::footnote(res$tables$plate$caption)
+
+res$plots$run
+knitr::kable(res$tables$run$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$run$caption)
+
+res$plots$bay
+knitr::kable(res$tables$bay$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$bay$caption)
+
+res$plots$overall
+knitr::kable(res$tables$overall$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$overall$caption)
+
+# Calculate raw read stats
+raw_stats <- sc_samples_reads %>%
+  pivot_longer(cols = -c(SampleID, Run, Bay), 
+               names_to = "Biomarker", 
+               values_to = "Value") %>%
+  group_by(Biomarker) %>%
+  summarize(
+    reads_mean = mean(Value, na.rm = TRUE),
+    reads_min = min(Value, na.rm = TRUE),
+    reads_max = max(Value, na.rm = TRUE),
+    .groups = "drop"
+  )
+# Summary
+sc_hi <- res$high_cv$summary %>%
+  left_join(raw_stats, by = "Biomarker")
+
+```
+
+### C.1.4 HIHG Reps
+2 per plate
+
+Raw Reads
+
+```{r hihg_cv, message=FALSE, warning=FALSE, echo=TRUE, eval=FALSE}
+
+res <- cv_plots(hihg_reps_reads, top_n = 10)
+
+# Plots
+res$plots$plate
+knitr::kable(res$tables$plate$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::add_header_above(c(" " = 1, "Run × Bay Plates" = ncol(res$tables$plate$data) - 1)) %>%
+  kableExtra::footnote(res$tables$plate$caption)
+
+res$plots$run
+knitr::kable(res$tables$run$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$run$caption)
+
+res$plots$bay
+knitr::kable(res$tables$bay$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$bay$caption)
+
+res$plots$overall
+knitr::kable(res$tables$overall$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$overall$caption)
+
+```
+
+#### NPQ
+
+```{r hihg_cv_npq, message=FALSE, warning=FALSE, echo=TRUE}
+res <- cv_plots(hihg_reps, top_n = 10)
+
+# Plots
+res$plots$plate
+knitr::kable(res$tables$plate$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::add_header_above(c(" " = 1, "Run × Bay Plates" = ncol(res$tables$plate$data) - 1)) %>%
+  kableExtra::footnote(res$tables$plate$caption)
+
+res$plots$run
+knitr::kable(res$tables$run$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$run$caption)
+
+res$plots$bay
+knitr::kable(res$tables$bay$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$bay$caption)
+
+res$plots$overall
+knitr::kable(res$tables$overall$data, digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE) %>%
+  kableExtra::footnote(res$tables$overall$caption)
+
+# Calculate raw read stats
+raw_stats <- hihg_reps_reads %>%
+  pivot_longer(cols = -c(SampleID, Run, Bay), 
+               names_to = "Biomarker", 
+               values_to = "Value") %>%
+  group_by(Biomarker) %>%
+  summarize(
+    reads_mean = mean(Value, na.rm = TRUE),
+    reads_min = min(Value, na.rm = TRUE),
+    reads_max = max(Value, na.rm = TRUE),
+    .groups = "drop"
+  )
+# Summary
+hihg_hi <- res$high_cv$summary %>%
+  left_join(raw_stats, by = "Biomarker")
+
+```
+
+## C.2 Internal Control (IC = mCherry)
+
+### C.2.1 CV for mCherry 
+Compute the cv for mCherry for all samples (reps and non-reps) within each plate.
+We did already look for IC outliers in the Sample QC, but that did not include the replicates.
+
+This shows a problem with 0804-Bay1 and also 0711-Bay1. The plots show extreme outliers. Our Sample QC already picked these up.
+
+I can try to drop outliers (40% of median) and rerun cv. Are the low reads in 0804-Bay1 really the problem? Also see if any of the reps are outliers (Sample QC did not look at that).
+
+```{r ic_cv, message=FALSE, warning=FALSE, echo=TRUE}
+
+cv_mCherry_plate <- raw_df %>%
+  pivot_longer(
+    cols = -c(SampleID, Run, Bay),
+    names_to = "Biomarker",
+    values_to = "Value"
+  ) %>%
+  filter(Biomarker == "mCherry") %>%
+  group_by(Run, Bay) %>%
+  summarize(
+    n           = n(),
+    median      = median(Value, na.rm = TRUE),
+    mean        = mean(Value, na.rm = TRUE),
+    sd          = sd(Value, na.rm = TRUE),
+    CV_mCherry  = 100 * sd / mean,
+    .groups = "drop"
+  ) %>%
+  mutate(Plate = paste0(Run, "_", Bay)) %>%
+  relocate(Plate)
+  
+knitr::kable(cv_mCherry_plate, digits = 2, caption = "CV for mCherry reads for all samples (including reps)") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+
+#Plot reads for each plate including all samples
+mCherry_raw <- raw_df %>%
+  pivot_longer(
+    cols = -c(SampleID, Run, Bay),
+    names_to = "Biomarker",
+    values_to = "Value"
+  ) %>%
+  filter(Biomarker == "mCherry") %>%
+  mutate(Plate = paste0(Run, "_", Bay))
+
+ggplot(mCherry_raw, aes(x = Bay, y = Value, fill = Bay)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(width = 0.15, size = 2.5, alpha = 0.6) +
+  facet_wrap(~ Run, scales = "fixed") +
+  theme_bw() +
+  labs(
+    title = "Raw mCherry Reads per Plate (Run × Bay)",
+    x = "Bay",
+    y = "mCherry Reads"
+  ) +
+  theme(
+    axis.text.x = element_text(face = "bold"),
+    strip.background = element_rect(fill = "lightgray"),
+    strip.text = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+```
+
+These are the plate-specific outliers. There are no reps in here. See what happens to cvs if we remove these samples.
+
+```{r ic_outliers, message=FALSE, warning=FALSE, echo=TRUE, eval=FALSE}
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+mCherry_flagged <- raw_df %>%
+  pivot_longer(
+    cols = -c(SampleID, Run, Bay),
+    names_to = "Biomarker",
+    values_to = "Value"
+  ) %>%
+  filter(Biomarker == "mCherry") %>%
+  left_join(
+    cv_mCherry_plate %>%
+      select(Run, Bay, median),
+    by = c("Run", "Bay")
+  ) %>%
+  mutate(
+    lower_cut = 0.6 * median,
+    upper_cut = 1.4 * median,
+    Flag_Outlier = Value < lower_cut |
+                   Value > upper_cut |
+                   Value < 1000,
+    Plate = paste0(Run, "_", Bay)
+  ) %>%
+  select(
+    SampleID, Run, Bay, Plate,
+    Value,
+    median, lower_cut, upper_cut,
+    Flag_Outlier
+  )
+
+
+outlier_table <- mCherry_flagged %>%
+  filter(Flag_Outlier == TRUE) %>%
+  arrange(Run, Bay, Value)
+
+outlier_table %>%
+  kable(format = "html", caption = "Flagged mCherry Outliers") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+### C.2.2 IC Raw Reads
+
+#### C.2.2.1 IC Reads in Reps
+IC (mCherry) raw read values for each of the replicate sets.
+
+```{r ic_reps, message=FALSE, warning=FALSE, echo=TRUE, eval=TRUE}
+#For all sets of reads from reps(ipc_samples_reads,nc_samples_reads,sc_samples_reads,hihg_reps_reads) make plots showing all values for the biomarker mCherry for each Run xBay, colored by each type of rep.
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+combined_long <- bind_rows(
+  ipc_samples_reads %>% mutate(RepType = "IPC"),
+  nc_samples_reads  %>% mutate(RepType = "NC"),
+  sc_samples_reads  %>% mutate(RepType = "SC"),
+  hihg_reps_reads   %>% mutate(RepType = "HIHG")
+) %>%
+  pivot_longer(
+    cols = -c(SampleID, Run, Bay, RepType),
+    names_to = "Biomarker",
+    values_to = "Value"
+  ) %>%
+  filter(Biomarker == "mCherry")
+
+# Plot: x = Bay, colored by RepType, one panel per Run
+ggplot(combined_long, aes(x = Bay, y = Value, color = RepType)) +
+  geom_jitter(width = 0.2, height = 0, size = 2, alpha = 0.8) +
+  facet_wrap(~ Run, scales = "fixed") +   # <- SAME Y-AXIS IN ALL PANELS
+  theme_bw() +
+  labs(
+    title = "mCherry values by Bay and Run",
+    x = "Bay",
+    y = "mCherry value",
+    color = "Replicate type"
+  ) +
+  theme(
+    axis.text.x = element_text(face = "bold"),
+    strip.background = element_rect(fill = "lightgray"),
+    strip.text = element_text(face = "bold"),
+    legend.position = "top"
+  )
+
+ med_table <- combined_long %>%
+    group_by(Run, Bay) %>%
+    summarize(Median = median(Value, na.rm = TRUE), .groups = "drop") %>%
+    arrange(Run, Bay) %>%
+    tidyr::pivot_wider(names_from = Bay, values_from = Median)
+ knitr::kable(med_table, digits = 2, caption = "Median Values of mCherry for all reps") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+ 
+```
+
+#### C.2.2.2 Non-IC Reads in Reps
+
+mCherry in reps does not track with non-mCherry Biomarkers for 0804 Bay1. For example, For non-IC biomarkers in the reps, Bay1 has similar median numbers of reads across the first three runs. But for mCherry, in Run 0804-Bay1 has a lot fewer than Bay1's in the other runs.
+
+This is not the case with Bay2 which has a consistent pattern in mCherry and other biomarkers across the first 3 runs.
+
+```{r non-ic_reps, message=FALSE, warning=FALSE, echo=TRUE, eval=TRUE}
+library(dplyr)
+library(ggplot2)
+
+combined_long <- bind_rows(
+  ipc_samples_reads %>% mutate(RepType = "IPC"),
+  nc_samples_reads  %>% mutate(RepType = "NC"),
+  sc_samples_reads  %>% mutate(RepType = "SC"),
+  hihg_reps_reads   %>% mutate(RepType = "HIHG")
+) %>%
+  pivot_longer(
+    cols = -c(SampleID, Run, Bay, RepType),
+    names_to = "Biomarker",
+    values_to = "Value"
+  )
+  # <-- NO FILTER(Biomarker == "mCherry") so we keep ALL biomarkers
+
+# Plot all biomarkers together
+# Function: return plot + median table for a RepType
+plot_and_medians <- function(data, rep_name) {
+  
+  df_rep <- data %>% filter(RepType == rep_name)
+
+  # ---- PLOT ----
+  p <- ggplot(df_rep, aes(x = Bay, y = Value, fill = Bay, color = Bay)) +
+    geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+    geom_jitter(width = 0.15, height = 0, size = 2.5, alpha = 0.6) +
+    facet_wrap(~ Run, scales = "fixed") +
+    theme_bw() +
+    labs(
+      title = paste("All Biomarkers —", rep_name, "Samples"),
+      subtitle = "Boxplots + Points by Bay and Run",
+      x = "Bay",
+      y = "Value"
+    ) +
+    theme(
+      axis.text.x = element_text(face = "bold"),
+      strip.background = element_rect(fill = "lightgray"),
+      strip.text = element_text(face = "bold")
+    ) +
+    guides(fill = "none", color = "none")
+
+  # ---- MEDIAN TABLE ----
+  med_table <- df_rep %>%
+    group_by(Run, Bay) %>%
+    summarize(Median = median(Value, na.rm = TRUE), .groups = "drop") %>%
+    arrange(Run, Bay) %>%
+    tidyr::pivot_wider(names_from = Bay, values_from = Median)
+
+  return(list(plot = p, medians = med_table))
+}
+
+# ---------------------------------------------------------
+# Generate all objects
+res_IPC  <- plot_and_medians(combined_long, "IPC")
+res_NC   <- plot_and_medians(combined_long, "NC")
+res_SC   <- plot_and_medians(combined_long, "SC")
+res_HIHG <- plot_and_medians(combined_long, "HIHG")
+
+
+res_IPC$plot
+knitr::kable(res_IPC$medians, digits = 2, caption = "Median Value per Bay × Run (IPC)") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+res_NC$plot
+knitr::kable(res_NC$medians, digits = 2, caption = "Median Value per Bay × Run (NC)") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+
+res_SC$plot
+knitr::kable(res_SC$medians, digits = 2, caption = "Median Value per Bay × Run (SC)") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+
+res_HIHG$plot
+knitr::kable(res_HIHG$medians, digits = 2, caption = "Median Value per Bay × Run (HIHG)") %>%
+  kableExtra::kable_styling(full_width = FALSE)
+
+```
+
+
+## C.3 High CV Biomarkers
+Let's walk through the Alamar normalization process and inspect biomarkers with high CVs.
+I'm not doing this for ALZ123 because there is a separate Rmd that I used to validate Normalization
+
+The starting level of mCherry (the IC) should be the same in each well. Divide each biomarker raw read count for the sample in the well by the read count of mCherry. Below shows this for each of the replicate pairs.
+
+```{r plot_functions, message=FALSE, warning=FALSE, echo=TRUE, eval=TRUE}
+
+# Function to make violin plots for all samples
+plot_biomarker_violins <- function(data, 
+                                   biomarkers,
+                                   rep_types = NULL,
+                                   value_col = "Value",
+                                   facet_by_biomarker = TRUE) {
+  
+  # Filter to specified biomarkers
+  plot_data <- data %>%
+    filter(Biomarker %in% biomarkers)
+  
+  if (nrow(plot_data) == 0) {
+    stop("No data found for specified biomarkers")
+  }
+  
+  # Filter by rep_types if specified
+  if (!is.null(rep_types)) {
+    if (!"RepType" %in% names(plot_data)) {
+      warning("RepType column not found, ignoring rep_types filter")
+    } else {
+      plot_data <- plot_data %>%
+        filter(RepType %in% rep_types)
+    }
+  }
+  
+  # Rename value column if needed
+  if (value_col != "Value" && value_col %in% names(plot_data)) {
+    names(plot_data)[names(plot_data) == value_col] <- "Value"
+  }
+  
+  # Check for required columns
+  required_cols <- c("Bay", "Run", "Biomarker", "Value")
+  missing_cols <- setdiff(required_cols, names(plot_data))
+  if (length(missing_cols) > 0) {
+    stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  # Abbreviate Run names if long
+  plot_data <- plot_data %>%
+    mutate(Run_short = case_when(
+      nchar(as.character(Run)) > 15 ~ paste0(substr(Run, 1, 12), "..."),
+      TRUE ~ as.character(Run)
+    ))
+  
+  # Determine if we have RepType for coloring
+  has_reptype <- "RepType" %in% names(plot_data)
+  
+  # Create plots
+  if (facet_by_biomarker && length(biomarkers) > 1) {
+    # Multiple biomarkers - create separate plots
+    plots <- lapply(biomarkers, function(biom) {
+      data_biom <- plot_data %>% filter(Biomarker == biom)
+      
+      p <- ggplot(data_biom, aes(x = Bay, y = Value))
+      
+      if (has_reptype && is.null(rep_types)) {
+  p <- p + 
+    geom_violin(aes(fill = RepType), alpha = 0.7, position = position_dodge(0.9)) +
+    geom_jitter(aes(color = RepType), alpha = 0.5, size = 2,
+               position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.9)) +
+    labs(fill = "Replicate Type", color = "Replicate Type")
+} else {
+  p <- p + 
+    geom_violin(fill = "steelblue", alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.5, size = 2, color = "darkblue")
+}
+      
+      p <- p +
+        facet_wrap(~ Run_short) +
+        theme_bw() +
+        labs(
+          title = paste("Biomarker:", biom),
+          x = "Bay",
+          y = "Value"
+        ) +
+        theme(
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, face = "bold"),
+          strip.background = element_rect(fill = "lightgray"),
+          strip.text = element_text(face = "bold", size = 9),
+          legend.position = "top"
+        )
+      
+      p
+    })
+    names(plots) <- biomarkers
+    
+    return(plots)
+    
+  } else {
+    # Single biomarker or combined plot
+    p <- ggplot(plot_data, aes(x = Bay, y = Value))
+    
+    if (has_reptype && is.null(rep_types)) {
+      p <- p + 
+        geom_violin(aes(fill = RepType), alpha = 0.7, position = position_dodge(0.9)) +
+        geom_jitter(aes(color = RepType), alpha = 0.5, size = 2,
+                   position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.9)) +
+        labs(fill = "Replicate Type", color = "Replicate Type")
+    } else {
+      p <- p + 
+        geom_violin(fill = "steelblue", alpha = 0.7) +
+        geom_jitter(width = 0.2, alpha = 0.5, size = 2, color = "darkblue")
+    }
+    
+    if (length(biomarkers) > 1) {
+      p <- p + facet_grid(Biomarker ~ Run_short)
+    } else {
+      p <- p + facet_wrap(~ Run_short)
+    }
+    
+    p <- p +
+      theme_bw() +
+      labs(
+        title = if(length(biomarkers) == 1) paste("Biomarker:", biomarkers[1]) else "Biomarker Distribution by Bay and Run",
+        x = "Bay",
+        y = "Value"
+      ) +
+      theme(
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, face = "bold"),
+        strip.background = element_rect(fill = "lightgray"),
+        strip.text = element_text(face = "bold", size = 9),
+        legend.position = "top"
+      )
+    
+    return(p)
+  }
+}
+
+# Function to plot replicates only
+plot_and_tables <- function(data, 
+                           value_col = NULL,
+                           top = 1,
+                           return_medians = FALSE,
+                           return_top = FALSE,
+                           return_all_reps = FALSE) {
+  
+  # Ensure all arguments are proper types
+  if (!is.null(value_col) && (!is.character(value_col) || length(value_col) != 1)) {
+    stop("value_col must be a single character string or NULL")
+  }
+  
+  # Determine value column
+  if (is.null(value_col)) {
+    # Auto-detect value column
+    value_candidates <- names(data)[grepl("Value", names(data), ignore.case = TRUE)]
+    if (length(value_candidates) > 0) {
+      value_col <- value_candidates[1]
+    } else {
+      stop("No value column found. Please specify 'value_col' parameter.")
+    }
+  }
+  
+  # Rename value column if needed
+  if (is.character(value_col) && nchar(value_col) > 0 && value_col %in% names(data)) {
+    if (value_col != "Value") {
+      # Remove existing "Value" column if it exists
+      if ("Value" %in% names(data)) {
+        data <- data %>% select(-Value)
+      }
+      names(data)[names(data) == value_col] <- "Value"
+    }
+  } else if (!"Value" %in% names(data)) {
+    stop("Could not find or rename value column to 'Value'")
+  }
+  
+  # Check for required columns
+  required_cols <- c("Bay", "RepType", "Value")
+  missing_cols <- setdiff(required_cols, names(data))
+  if (length(missing_cols) > 0) {
+    stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  # Determine faceting based on available columns
+  has_biomarker <- "Biomarker" %in% names(data) && length(unique(data$Biomarker)) > 0
+  has_run <- "Run" %in% names(data) && length(unique(data$Run)) > 0
+  
+  # Get unique biomarkers if column exists
+  biomarkers <- if(has_biomarker) unique(data$Biomarker) else NULL
+  
+  # Abbreviate Run names if they're long
+  if (has_run) {
+    data <- data %>%
+      mutate(Run_short = case_when(
+        nchar(as.character(Run)) > 15 ~ paste0(substr(Run, 1, 12), "..."),
+        TRUE ~ as.character(Run)
+      ))
+  }
+  
+  # Initialize results list
+  results <- list()
+  
+  # Create plots for each biomarker
+  if (has_biomarker && length(biomarkers) > 1) {
+    # Multiple biomarkers - create individual plots
+    results$plots <- lapply(biomarkers, function(biom) {
+      data_biom <- data %>% filter(Biomarker == biom)
+      
+      p <- ggplot(data_biom, aes(x = Bay, y = Value, color = RepType)) +
+        geom_jitter(width = 0.2, height = 0, size = 2.5, alpha = 0.8) +
+        theme_bw() +
+        labs(
+          title = paste("Biomarker:", biom),
+          x = "Bay",
+          y = "Value",
+          color = "Replicate type"
+        ) +
+        theme(
+          axis.text.x = element_text(face = "bold", angle = 90, vjust = 0.5, hjust = 1),
+          strip.background = element_rect(fill = "lightgray"),
+          strip.text = element_text(face = "bold", size = 8),
+          strip.text.x = element_text(angle = 0),
+          legend.position = "top"
+        )
+      
+      if (has_run) {
+        p <- p + facet_wrap(~ Run_short)
+      }
+      
+      p
+    })
+    names(results$plots) <- biomarkers
+    
+    # Also create a combined plot
+    p_combined <- ggplot(data, aes(x = Bay, y = Value, color = RepType)) +
+      geom_jitter(width = 0.2, height = 0, size = 2.5, alpha = 0.8) +
+      theme_bw() +
+      labs(
+        title = "Biomarker Values by Bay and Run",
+        x = "Bay",
+        y = "Value",
+        color = "Replicate type"
+      ) +
+      theme(
+        axis.text.x = element_text(face = "bold", angle = 90, vjust = 0.5, hjust = 1),
+        strip.background = element_rect(fill = "lightgray"),
+        strip.text = element_text(face = "bold", size = 8),
+        strip.text.x = element_text(angle = 0),
+        legend.position = "top"
+      )
+    
+    if (has_run) {
+      p_combined <- p_combined + facet_grid(Biomarker ~ Run_short)
+    } else {
+      p_combined <- p_combined + facet_wrap(~ Biomarker)
+    }
+    
+    results$plot_combined <- p_combined
+    
+  } else {
+    # Single biomarker or no biomarker column - create single plot
+    p <- ggplot(data, aes(x = Bay, y = Value, color = RepType)) +
+      geom_jitter(width = 0.2, height = 0, size = 2.5, alpha = 0.8) +
+      theme_bw() +
+      labs(
+        title = if(has_biomarker) paste("Biomarker:", biomarkers[1]) else "Biomarker Values by Bay and Run",
+        x = "Bay",
+        y = "Value",
+        color = "Replicate type"
+      ) +
+      theme(
+        axis.text.x = element_text(face = "bold", angle = 90, vjust = 0.5, hjust = 1),
+        strip.background = element_rect(fill = "lightgray"),
+        strip.text = element_text(face = "bold", size = 8),
+        strip.text.x = element_text(angle = 0),
+        legend.position = "top"
+      )
+    
+    if (has_run) {
+      p <- p + facet_wrap(~ Run_short)
+    }
+    
+    results$plot <- p
+  }
+  
+  # ---- MEDIAN TABLE ----
+  if (isTRUE(return_medians)) {
+    group_cols <- c(if(has_biomarker) "Biomarker", if(has_run) "Run", "Bay")
+    
+    med_table <- data %>%
+      group_by(across(all_of(group_cols))) %>%
+      summarize(Median = median(Value, na.rm = TRUE), .groups = "drop") %>%
+      arrange(across(all_of(group_cols))) %>%
+      tidyr::pivot_wider(names_from = Bay, values_from = Median)
+    
+    results$medians <- med_table
+  }
+  
+  # ---- TOP VALUES TABLE ----
+  if (isTRUE(return_top)) {
+    group_cols <- c(if(has_biomarker) "Biomarker", if(has_run) "Run", "Bay")
+    select_cols <- c(group_cols, "SampleID", "Value")
+    
+    top_table <- data %>%
+      group_by(across(all_of(group_cols))) %>%
+      arrange(desc(Value)) %>%
+      slice_head(n = top) %>%
+      ungroup() %>%
+      select(all_of(select_cols)) %>%
+      arrange(across(all_of(group_cols)), desc(Value))
+    
+    results$top_values <- top_table
+  }
+  
+  # ---- ALL REPS TABLE ----
+  if (isTRUE(return_all_reps)) {
+    select_cols <- c(if(has_biomarker) "Biomarker", 
+                     if(has_run) "Run", 
+                     "Bay", "SampleID", "RepType", "Value")
+    
+    all_reps_table <- data %>%
+      select(all_of(intersect(select_cols, names(data)))) %>%
+      arrange(across(all_of(intersect(select_cols[1:(length(select_cols)-2)], 
+                                      names(data)))), SampleID)
+    
+    results$all_reps <- all_reps_table
+  }
+  
+  return(results)
+}
+```
+
+### Summary
+
+```{r normalize, message=FALSE, warning=FALSE, echo=TRUE, eval=TRUE, results='asis', fig.width=12, fig.height=10}
+# ==============================================================================
+# C.3 HIGH CV BIOMARKERS - DATA PREPARATION
+# ==============================================================================
+
+# --- COMBINE ALL REPS IN LONG FORMAT (READS) ---
+combined_reps_long <- bind_rows(
+  nc_samples_reads %>%
+    pivot_longer(cols = -c(SampleID, Run, Bay),
+                 names_to = "Biomarker", values_to = "Value") %>%
+    mutate(RepType = "NC"),
+  ipc_samples_reads %>%
+    pivot_longer(cols = -c(SampleID, Run, Bay),
+                 names_to = "Biomarker", values_to = "Value") %>%
+    mutate(RepType = "IPC"),
+  sc_samples_reads %>%
+    pivot_longer(cols = -c(SampleID, Run, Bay),
+                 names_to = "Biomarker", values_to = "Value") %>%
+    mutate(RepType = "SC"),
+  hihg_reps_reads %>%
+    pivot_longer(cols = -c(SampleID, Run, Bay),
+                 names_to = "Biomarker", values_to = "Value") %>%
+    mutate(RepType = "HIHG")
+)
+
+# --- COMBINE ALL REPS IN LONG FORMAT (NPQ) ---
+combined_reps_npq_long <- bind_rows(
+  nc_samples_npq %>%
+    pivot_longer(cols = -c(SampleID, Run, Bay),
+                 names_to = "Biomarker", values_to = "NPQ") %>%
+    mutate(RepType = "NC"),
+  ipc_samples_npq %>%
+    pivot_longer(cols = -c(SampleID, Run, Bay),
+                 names_to = "Biomarker", values_to = "NPQ") %>%
+    mutate(RepType = "IPC"),
+  sc_samples_npq %>%
+    pivot_longer(cols = -c(SampleID, Run, Bay),
+                 names_to = "Biomarker", values_to = "NPQ") %>%
+    mutate(RepType = "SC"),
+  hihg_reps_npq %>%
+    pivot_longer(cols = -c(SampleID, Run, Bay),
+                 names_to = "Biomarker", values_to = "NPQ") %>%
+    mutate(RepType = "HIHG")
+)
+
+# --- SAMPLES ONLY (non-reps) IN LONG FORMAT (READS) ---
+combined_samples_long <- raw_df %>%
+  filter(!SampleID %in% rep_sample_ids) %>%
+  pivot_longer(
+    cols = -c(SampleID, Run, Bay),
+    names_to = "Biomarker",
+    values_to = "Value"
+  ) %>%
+  mutate(RepType = "Sample")
+
+# --- SAMPLES ONLY (non-reps) IN LONG FORMAT (NPQ) ---
+combined_samples_npq_long <- combined_df %>%
+  filter(!SampleID %in% rep_sample_ids) %>%
+  pivot_longer(
+    cols = -c(SampleID, Run, Bay),
+    names_to = "Biomarker",
+    values_to = "NPQ"
+  ) %>%
+  mutate(RepType = "Sample")
+
+# --- COMBINED REPS + SAMPLES (READS) ---
+combined_all_long <- bind_rows(combined_reps_long, combined_samples_long)
+
+# --- COMBINED REPS + SAMPLES (NPQ) ---
+combined_all_npq_long <- bind_rows(combined_reps_npq_long, combined_samples_npq_long)
+
+# --- IC NORMALIZATION ---
+# Extract mCherry values
+mCherry_vals <- combined_all_long %>%
+  filter(Biomarker == "mCherry") %>%
+  select(SampleID, mCherry_Value = Value)
+
+# IC normalize
+combined_norm <- combined_all_long %>%
+  left_join(mCherry_vals, by = "SampleID") %>%
+  mutate(Value_norm = Value / mCherry_Value)
+
+# Remove mCherry from normalized data
+combined_norm_no_mCherry <- combined_norm %>%
+  filter(Biomarker != "mCherry")
+
+# For ALZ123, add transformed normalized value for CV calculations
+combined_norm <- combined_norm %>%
+  mutate(Value_norm2 = Value_norm * 10000 + 1)
+
+# ==============================================================================
+# BIOMARKER SELECTION AND PLOTTING
+# ==============================================================================
+
+# --- SELECT BIOMARKERS TO EXAMINE ---
+cat("**Biomarkers with HIGH CVs for 2^NPQ**\n\n")
+
+knitr::kable(ipc_hi, digits = 3, caption = "High CV for IPC") %>% 
+  kableExtra::kable_styling(full_width = TRUE)
+knitr::kable(sc_hi, digits = 3, caption = "High CV for SC") %>% 
+  kableExtra::kable_styling(full_width = TRUE)
+knitr::kable(hihg_hi, digits = 3, caption = "High CV for HIHG") %>% 
+  kableExtra::kable_styling(full_width = TRUE)
+
+cat("\n\n**Biomarkers with HIGH CVs for IPC or SC:**\n\n")
+biom_hi <- unique(c(ipc_hi$Biomarker, sc_hi$Biomarker))
+cat(paste(biom_hi, collapse = ", "), "\n\n")
+
+cat("\n\n**Biomarkers with HIGH CVs only for HIHG:**\n\n")
+hihg_only_all <- setdiff(hihg_hi$Biomarker, biom_hi)
+cat(paste(hihg_only_all, collapse = ", "), "\n\n")
+
+cat("\n\n**Biomarkers with HIGH CVs only for HIHG with min_reads>=500:**\n\n")
+hihg_only_low <- hihg_hi %>%
+  filter(Biomarker %in% hihg_only_all, reads_min < 500) %>%
+  pull(Biomarker)
+hihg_only <- setdiff(hihg_only_all, hihg_only_low)
+cat(paste(hihg_only, collapse = ", "), "\n\n")
+
+# --- PREPARE DATA FOR PLOTTING ---
+my_biomarkers <- c(biom_hi, hihg_only)
+#my_biomarkers=c("IL17A", "NEFH")
+
+# Filter to biomarkers of interest
+combined_reps_short <- combined_reps_long %>%
+  filter(Biomarker %in% my_biomarkers)
+
+combined_norm_short <- combined_norm %>%
+  filter(Biomarker %in% my_biomarkers)
+
+# --- GENERATE PLOTS ---
+cat("\n\n**mCherry Reads**\n\n")
+mCherry_data <- combined_reps_long %>% filter(Biomarker == "mCherry")
+res_mCherry <- plot_and_tables(mCherry_data)
+print(res_mCherry$plot)
+
+# Generate results for each normalization
+res_reads <- plot_and_tables(combined_reps_short)
+res_norm <- plot_and_tables(combined_norm_short, value_col = "Value_norm2")
+
+# --- IPC NORMALIZATION ---
+ipc_medians_long <- combined_norm_short %>%
+  filter(RepType == "IPC") %>%
+  group_by(Run, Bay, Biomarker) %>%
+  summarize(IPC_plate_median = median(Value_norm, na.rm = TRUE), .groups = "drop")
+
+combined_ipc_norm <- combined_norm_short %>%
+  filter(RepType != "IPC") %>%
+  left_join(ipc_medians_long, by = c("Run", "Bay", "Biomarker")) %>%
+  mutate(
+    Value_IPC_norm = log2(1 + (Value_norm / IPC_plate_median) * 10000),
+    Value_IPC_norm2 = 2^Value_IPC_norm
+  )
+
+combined_ipc_norm <- combined_ipc_norm %>%  #These are IPC-normalized values for NC, SC and HIHG
+  filter(RepType != "Sample")
+
+res_npq <- plot_and_tables(combined_ipc_norm, value_col = "Value_IPC_norm2")
+
+# --- PLOT EACH BIOMARKER ---
+for (biom in my_biomarkers) {
+  cat("\n### ", biom, "\n\n")
+  
+  cat("**Raw Reads**\n\n")
+  if (!is.null(res_reads$plots[[biom]])) {
+    print(res_reads$plots[[biom]])
+  }
+  cat("\n\n")
+  
+  cat("**IPC-normalized**\n\n")
+  if (!is.null(res_npq$plots[[biom]])) {
+    print(res_npq$plots[[biom]])
+  }
+  cat("\n\n")
+  
+  cat("**Non-rep NPQ**\n\n")
+  print(plot_biomarker_violins(combined_all_npq_long, biomarkers = biom, value_col= "NPQ"))
+  cat("\n\n")
+}
+
+
+```
+
+Notes: 
+
+* CV is not appropriate for NPQs because it is log2. We have to go back to the ratio before we took the log.
+
+* For some biomarkers, e.g. Oligo-SNCA,pTau-217 the HIHG controls look like NC. Maybe they really don't have any of the protein. The SC and IPC must be specifically pooled to have some.
+For some, HIHG controls are between SC and NC, e.g., PGK1, AB38, IL17A
+
+* NEFH is pretty bad across reps types. Everything is mixed with NCs. Very low reads for all reps. What does it look like for non-rep samples?
+
+* IL17A only looks off for 1125-Bay1. THERE IS ONE OUTLYING IPC REP IN THAT PLATE. It is hard to tell about the other reps because that one is so far out.It looks only that first Bay is bad. Check the median. Check Non-Rep samples for a trend. Drop the Bay and see if that fixes CV for this biomarker.
+
+* NPTX1 too.1007-Bay3 has an outlying IPC. Seems to have some Bay effects too.
+* FCN2 0711-Bay3 has outlying IPC. 1124 Bay2 is off too.
+
+* IL10 first run has some spread IPCs and SCs. Some outlier IPCs. 
+* SFRP1 Bay differences for the first Run and last two. Bad for HIHG reps even though has sufficient reads. Lower reads for other reps- some <500.
+
+* ANXA5 shows some bay differences in HIHG for the last two runs
+
+* CRP has a lot of variation in NCs for some plates
+
+* Look specifically for biomarkers with high CV for IPCs. IPCs can have variation across bays and runs as long as they track with the other reps. Within Bay-high CV may be most indicative of an IPC problem, e.g., AB38
+
+
+* It is interesting that HIHG Reps have CVs that get worse for increasing Bays. Bay3 is always the worst location. This is worrisome, because HIHG reps are more representative of our single samples than a pool. If we consistently have more variation in Bay3, that's a problem.
+
+* Make a rule to ignore reps if <500 reads. This will take care of the HIHG-only problems.
+
+* 13.28785664 = log2(10001) This is what happens when the ratio is 1. Why are so many IPCs taking on this value across biomarkers? Because they are actually IPC normalized, so the ones with 1 are the medians. Every plate has one that has this value. So the CV of the IPC normalized values may not really matter a lot??
+
+* Look at outliers on sample plots. Are they triaged?

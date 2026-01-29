@@ -1,0 +1,1722 @@
+---
+title: "Association Analysis of High-Count/High-Detectability Biomarkers in U19 Data"
+author: "ERM"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 5
+    toc_float: true
+    code_folding: hide
+---
+
+# A. Overview
+
+This report is an examination of the High-Count and High-Detectability biomarkers after primary QC. As of 12/19/25 we are adding in ALZ3. Redone 12/21/25 with correctly merged ALZ123 datasets.
+
+## A.1 Input Data
+
+**Required Input Data Files:** Place all files in a folder called `input_files` in the working directory.
+
+1. **Post-QC Biomarker NPQ data for High-read/High-det markers** (`NPQ_xxxxxxxx_post.csv`) – Rows: samples; Columns: biomarkers; Copied from Primary QC `output_files` directory. Assign the filename to the variable `NPQ_data` below.
+2. **Meta-data for U19 samples** (`U19_Alamar_metadata_2025Dec01.csv`)
+
+**Output Data Files:** Analyst should create a folder `output_files` in the working directory.
+...
+
+## A.2 Thresholds
+
+Adjustable QC parameters include:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `FDR` | 0.05 | Within-group FDR adjustment|
+
+---
+
+## A.3 Initial Setup 
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+# Input filenames
+NPQ_data <- "NPQ_20251220_post_QC.csv" #SPECIFY THE FILE NAME CONTAINING NPQ DATA
+Meta_data <- "U19_Alamar_metadata_2025Dec17.csv" #SPECIFY THE FILE NAME CONTAINING META DATA (e.g., phenotype and covariates)
+
+# Create output folder if it doesn't exist
+if (!dir.exists("output_files")) dir.create("output_files")
+
+# Thresholds
+FDR <- 0.05
+
+```
+  
+Input file is: `NPQ_data`
+
+Sample Counts:
+
+```{r load-and-format, message=FALSE, warning=FALSE, echo=TRUE, results='asis'}
+library(tidyverse)
+
+# --- Read biomarker NPQ data ---
+df <- read_csv(file.path("input_files", NPQ_data), show_col_types = FALSE)
+
+#Function to summarize numbers of samples by Run/Bay
+summarize_counts <- function(df, type_name) {
+  df %>%
+    group_by(Run, Bay) %>%
+    summarise(!!type_name := n(), .groups = "drop")
+}
+
+# Summarize counts by Run × Bay
+df_summary <- df %>%
+  group_by(Run, Bay) %>%
+  summarise(All_Samples = n(), .groups = "drop") %>%
+  arrange(Run, Bay)
+
+knitr::kable(df_summary)
+```
+
+# B. Biomarkers
+Examine the relationship of biomarker values in the dataset.
+
+## B.1 Clustering
+Cluster the biomakers into smaller groups for ease of visualization.
+
+Start with the whole set:
+
+```{r cluster-biomarkers, message=FALSE, warning=FALSE, echo=TRUE}
+library(caret)
+library(pheatmap)
+
+# Keep only numeric biomarker columns
+num_cols <- sapply(df, is.numeric)
+samp_num <- df[, num_cols]
+
+# Compute correlation matrix
+cor_mat <- cor(samp_num, use = "pairwise.complete.obs")
+
+# Heatmap of biomarker correlations
+
+pheatmap(cor_mat,
+         main = "Heatmap of Biomarkers",
+         fontsize_row = 6, fontsize_col = 6)
+
+# 1. Visual inspection with dendrogram
+hc <- hclust(as.dist(1 - cor_mat))
+plot(hc, cex = 0.5, main = "Biomarker Dendrogram")
+rect.hclust(hc, k = 8, border = "red")  # Visualize 10 groups
+
+# 2. Cut tree into groups
+n_groups <- 8  # Adjust based on dendrogram
+clusters <- cutree(hc, k = n_groups)
+
+# 3. Create data frame for easy viewing
+cluster_df <- data.frame(
+  Biomarker = names(clusters),
+  Group = clusters
+) %>% arrange(Group)
+
+# 4. Save groups as list
+biomarker_groups <- split(cluster_df$Biomarker, cluster_df$Group)
+
+# 5. Examine each group
+for(i in seq_along(biomarker_groups)) {
+  cat("\n=== Group", i, "===\n")
+  cat("Size:", length(biomarker_groups[[i]]), "\n")
+  print(biomarker_groups[[i]])
+}
+
+# 6. Save to file
+write.csv(cluster_df, "biomarker_groups.csv", row.names = FALSE)
+
+```
+
+## B.2 Biomarker Groups
+
+```{r heatmaps-plots--biomarkers, message=FALSE, warning=FALSE, echo=TRUE, results='asis',eval=TRUE}
+
+plot_group_heatmaps <- function(df, biomarker_groups, cor_mat = NULL,
+                                show_numbers = FALSE,
+                                min_group_size = 2,
+                                fontsize = 8,
+                                add_boxplots = TRUE) {
+  library(pheatmap)
+  library(ggplot2)
+  library(tidyr)
+  library(dplyr)
+  
+  # If correlation matrix not provided, compute it
+  if (is.null(cor_mat)) {
+    num_cols <- sapply(df, is.numeric)
+    samp_num <- df[, num_cols]
+    cor_mat <- cor(samp_num, use = "pairwise.complete.obs")
+  }
+  
+  # Get numeric data for boxplots
+  num_cols <- sapply(df, is.numeric)
+  samp_num <- df[, num_cols]
+  
+  # Summary statistics
+  cat("**Total groups:** ", length(biomarker_groups), "\n\n")
+  cat("**Total biomarkers:** ", sum(sapply(biomarker_groups, length)), "\n\n")
+  
+  # Group size distribution
+  group_sizes <- sapply(biomarker_groups, length)
+  cat("**Group sizes:** Min =", min(group_sizes), 
+      ", Max =", max(group_sizes),
+      ", Mean =", round(mean(group_sizes), 1), "\n\n")
+  cat("---\n\n")
+  
+  # Loop through each group
+  for (i in seq_along(biomarker_groups)) {
+    group_biomarkers <- biomarker_groups[[i]]
+    
+    # Print header
+    cat("\n### Group", i, "\n")
+    cat("**Size:** ", length(group_biomarkers), " biomarker(s)\n\n")
+    
+    # Skip if group is too small
+    if (length(group_biomarkers) < min_group_size) {
+      cat("*Group has fewer than", min_group_size, "biomarkers - skipping visualizations.*\n\n")
+      cat("**Biomarkers:**", paste(group_biomarkers, collapse = ", "), "\n\n")
+      next
+    }
+    
+    # Show biomarker list
+    cat("**Biomarkers:**\n\n")
+    cat(paste("-", group_biomarkers, collapse = "\n\n"), "\n\n")
+    
+    # Subset correlation matrix for this group
+    group_cor <- cor_mat[group_biomarkers, group_biomarkers]
+    
+    # Summary statistics for this group
+    upper_tri <- group_cor[upper.tri(group_cor)]
+    cat("**Correlation summary:**\n\n")
+    cat("- Mean correlation:", round(mean(upper_tri), 3), "\n\n")
+    cat("- Median correlation:", round(median(upper_tri), 3), "\n\n")
+    cat("- Range:", round(min(upper_tri), 3), "to", round(max(upper_tri), 3), "\n\n")
+    
+    # Create heatmap
+    cat("#### Correlation Heatmap\n")
+    pheat_obj <- NULL
+    tryCatch({
+      # Adjust font size based on group size
+      auto_fontsize <- max(4, min(fontsize, 12 - length(group_biomarkers) / 5))
+      
+      pheat_obj <- pheatmap(group_cor,
+                            main = paste("Group", i, "Correlation Heatmap"),
+                            fontsize_row = auto_fontsize,
+                            fontsize_col = auto_fontsize,
+                            display_numbers = show_numbers,
+                            number_color = "black",
+                            border_color = "grey60",
+                            cellwidth = max(10, 200 / length(group_biomarkers)),
+                            cellheight = max(10, 200 / length(group_biomarkers)))
+    }, error = function(e) {
+      cat("*Error creating heatmap for this group.*\n\n")
+    })
+    
+    cat("\n")
+    
+    # Add boxplots if requested
+    if (add_boxplots && !is.null(pheat_obj)) {
+      cat("\n#### Distribution Boxplots\n")
+      
+      tryCatch({
+        # Subset data for this group
+        group_data <- samp_num[, group_biomarkers, drop = FALSE]
+        
+        # Extract the row order from pheatmap
+        biomarker_order <- rownames(group_cor)[pheat_obj$tree_row$order]
+        
+        # Convert to long format for ggplot
+        group_long <- group_data %>%
+          pivot_longer(cols = everything(),
+                       names_to = "Biomarker",
+                       values_to = "Value") %>%
+          mutate(Biomarker = factor(Biomarker, levels = biomarker_order))
+        
+        # Create boxplot
+        p <- ggplot(group_long, aes(x = Biomarker, y = Value)) +
+          geom_boxplot(fill = "steelblue", alpha = 0.7, outlier.color = "red") +
+          theme_minimal() +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1, size = auto_fontsize),
+                axis.text.y = element_text(size = 8),
+                plot.title = element_text(size = 12, face = "bold")) +
+          labs(title = paste("Group", i, "- Biomarker Distributions"),
+               x = "Biomarker",
+               y = "Value") +
+          coord_flip()
+        
+        print(p)
+        
+      }, error = function(e) {
+        cat("*Error creating boxplots for this group.*\n\n")
+      })
+      
+      cat("\n\n")
+    }
+  }
+}
+
+plot_group_heatmaps(df, biomarker_groups, cor_mat, 
+                    show_numbers = FALSE,
+                    min_group_size = 3,
+                    fontsize = 8,
+                    add_boxplots = TRUE)
+
+```
+
+# C. Meta-data
+For each group, are covariates (sex, age, AD) associated with biomarkers (ignoring lod).
+I'm curious to look at error above and below the lod. Also, how are these dostributed across plates?
+
+## C.1 Summary
+
+```{r get_meta, message=FALSE, warning=FALSE, echo=TRUE, results= 'asis'}
+library(dplyr)
+
+summarize_df_pretty <- function(df, exclude_cols = NULL) {
+  
+  # Exclude columns if specified
+  if (!is.null(exclude_cols)) {
+    df <- df %>% select(-all_of(exclude_cols))
+  }
+  
+  # --- Numeric summary ---
+  num_summary <- df %>%
+    select(where(is.numeric)) %>%
+    pivot_longer(cols = everything(), names_to = "Column", values_to = "Value") %>%
+    group_by(Column) %>%
+    summarise(
+      Summary = paste0(
+        "min=", round(min(Value, na.rm = TRUE),2), 
+        ", Q1=", round(quantile(Value, 0.25, na.rm = TRUE),2),
+        ", median=", round(median(Value, na.rm = TRUE),2),
+        ", Q3=", round(quantile(Value, 0.75, na.rm = TRUE),2),
+        ", max=", round(max(Value, na.rm = TRUE),2),
+        ", mean=", round(mean(Value, na.rm = TRUE), 2),
+        ", sd=", round(sd(Value, na.rm = TRUE), 2)
+      ),
+      .groups = "drop"
+    )
+  
+  # --- Character/factor summary ---
+  char_summary <- df %>%
+    select(where(~is.character(.) || is.factor(.))) %>%
+    pivot_longer(cols = everything(), names_to = "Column", values_to = "Value") %>%
+    group_by(Column, Value) %>%
+    summarise(Count = n(), .groups = "drop") %>%
+    arrange(Column, desc(Count)) %>%
+    group_by(Column) %>%
+    summarise(Summary = paste0(Value, " (", Count, ")", collapse = "; "), .groups = "drop")
+  
+  # --- Combine numeric and character summaries ---
+  bind_rows(num_summary, char_summary) %>%
+    arrange(Column)
+}
+
+meta_df <- read_csv(file.path("input_files", Meta_data), show_col_types = FALSE)
+
+meta_plus <- meta_df %>%
+  semi_join(df, by = c("SAMPLE_ALIQUOT" = "SampleID")) %>%   # keep only matching samples
+  left_join(
+    df ,
+    by = c("SAMPLE_ALIQUOT" = "SampleID")
+  )
+
+meta_plus <- meta_plus %>% rename(SampleID = SAMPLE_ALIQUOT, APOE.geno = APOE.x, APOE = APOE.y) #This is combined covariate and biom data
+
+summary_table <- summarize_df_pretty(meta_plus[,5:21])
+knitr::kable(summary_table, caption = "Summary of Meta-data")
+
+#knitr::kable(meta_plus %>% count(Race, Ethnicity, Group, sex))
+
+cat("**Categories to keep combining Race and Group: BL-AA, BL-AFDC, WH-HI, MU-HI (Exclude BL-HI for now because so few males.)**")
+  
+#Combine and filter Race_Ethnicity groups
+meta_plus <- meta_plus %>%
+  mutate(Race_Ethnicity = paste(Race, Group, sep = "_"))
+meta_plus_race <- meta_plus %>%
+    filter(Race_Ethnicity %in% c("BL_AA", "BL_AFDC","WH_HI", "MU_HI")) %>%
+    mutate(Race_Ethnicity = factor(Race_Ethnicity, levels = c("BL_AA", "BL_AFDC","WH_HI", "MU_HI")))
+#knitr::kable(meta_plus_race %>% count(Race, Group, sex, CDX))
+
+meta_plus_race_dx <- meta_plus_race %>%
+    filter(CDX %in% c("NCI", "MCI","AD")) %>%
+    mutate(CDX = factor(CDX, levels = c("NCI", "MCI","AD")))
+#knitr::kable(meta_plus_race_dx %>% count(Race, Group, sex, CDX))
+
+meta_plus_race_dx <- meta_plus_race_dx %>%
+  rename(age_at_sample = age_at_subject)
+
+summary_table <- meta_plus_race_dx %>%
+  group_by(Race_Ethnicity, sex, CDX) %>%
+  summarise(
+    n = n(),
+    Age_mean = mean(age_at_sample, na.rm = TRUE),
+    Age_sd   = sd(age_at_sample, na.rm = TRUE),
+    .groups = "drop"
+  )
+knitr::kable(summary_table)
+#knitr::kable(meta_plus_race_dx %>% count(Race_Ethnicity, CDX, Run, Bay))
+
+# meta_plus has all data, meta_plus_race contains only samples with selected race_ethnicity and meta_plus_race_dx contains only those with valid dx.
+# Export dataset for later use
+write.csv(meta_plus_race_dx, "meta_plus_race_dx.csv", row.names = FALSE)
+```
+
+
+# D. Univariate Tests with Biomarkers
+For each Group of biomarkers, test for association with covariates.
+
+## D.1 Covariate Effects
+```{r meta_assoc_covar, eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, results='asis'}
+library(dplyr)
+library(purrr)
+library(broom)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(tidyr)
+library(gridExtra)
+
+test_covariate_associations <- function(meta_plus, biomarker_groups, 
+                                       covariates = c("sex", "age_at_sample"),
+                                       fdr_threshold = 0.05,
+                                       max_plots_per_page = 6,
+                                       min_group_n = 5, print_tables = FALSE,
+                                       biomarkers_to_test = NULL) {  
+  
+  # Filter biomarker_groups if specific biomarkers requested
+  if (!is.null(biomarkers_to_test)) {
+    biomarker_groups <- lapply(biomarker_groups, function(group) {
+      intersect(group, biomarkers_to_test)
+    })
+    # Remove empty groups
+    biomarker_groups <- biomarker_groups[sapply(biomarker_groups, length) > 0]
+    
+    cat("**Testing", length(unlist(biomarker_groups)), "specified biomarkers**\n\n")
+  }
+  # Helper function to protect variable names
+  protect_name <- function(name) {
+    if (grepl("[^a-zA-Z0-9_.]", name)) {
+      return(paste0("`", name, "`"))
+    }
+    return(name)
+  }
+  
+  # Initialize results storage
+  all_results <- list()
+  pairwise_results <- list()
+  
+  # Loop through each group
+  for (i in seq_along(biomarker_groups)) {
+    group_biomarkers <- biomarker_groups[[i]]
+    
+    cat("\n#### Group", i, "\n\n")
+ 
+    # Get ID column and any other essential metadata
+    essential_cols <- c("SampleID", covariates)
+    select_cols <- unique(c(essential_cols, group_biomarkers))
+    
+    group_data <- meta_plus %>% 
+      select(all_of(select_cols))  
+    biomarkers <- group_biomarkers
+    
+    # Loop through each covariate
+    for (cov in covariates) {
+      cat("\n##### Association with", cov, "\n\n")
+      
+      # Filter for complete cases on this covariate
+      group_data_cov <- group_data %>%
+        filter(!is.na(.data[[cov]]))
+      
+      # Convert to factor if character
+      if (is.character(group_data_cov[[cov]])) {
+        group_data_cov[[cov]] <- factor(group_data_cov[[cov]])
+      }
+      
+      # Determine test type based on covariate type
+      is_categorical <- is.factor(group_data_cov[[cov]]) || 
+                       is.character(group_data_cov[[cov]])
+      
+      if (is_categorical) {
+        # Filter groups by minimum sample size
+        group_counts <- table(group_data_cov[[cov]])
+        valid_groups <- names(group_counts[group_counts >= min_group_n])
+        
+        if (length(valid_groups) < length(group_counts)) {
+          excluded <- setdiff(names(group_counts), valid_groups)
+          cat("*Excluding groups with n <", min_group_n, ":", 
+              paste(paste0(excluded, " (n=", group_counts[excluded], ")"), collapse=", "), "*\n\n")
+        }
+        
+        group_data_cov <- group_data_cov %>% filter(.data[[cov]] %in% valid_groups)
+        group_data_cov[[cov]] <- droplevels(group_data_cov[[cov]])
+        
+        n_levels <- length(unique(group_data_cov[[cov]]))
+        
+        if (n_levels < 2) {
+          cat("*Skipping", cov, "- fewer than 2 valid groups*\n\n")
+          next
+        }
+        
+        # Print group sample sizes
+        cat("**Group sizes:**", paste(names(group_counts[valid_groups]), "=", 
+                                       group_counts[valid_groups], collapse=", "), "\n\n")
+        
+        # Run tests
+        results_cov <- map_df(
+          biomarkers,
+          ~ {
+            tryCatch({
+              protected_biomarker <- protect_name(.x)
+              protected_cov <- protect_name(cov)
+              formula_str <- paste(protected_biomarker, "~", protected_cov)
+              
+              if (n_levels == 2) {
+                # T-test for binary variables
+                tb <- t.test(as.formula(formula_str), data = group_data_cov)
+                
+                # Get group means
+                group_means <- group_data_cov %>%
+                  group_by(!!sym(cov)) %>%
+                  summarise(mean = mean(!!sym(.x), na.rm = TRUE), .groups = "drop")
+                
+                tibble(
+                  Biomarker = .x,
+                  statistic = tb$statistic,
+                  p.value = tb$p.value,
+                  method = "t-test",
+                  mean_diff = diff(group_means$mean),
+                  group_info = paste(group_means[[cov]], "=", 
+                                    round(group_means$mean, 3), collapse = "; ")
+                )
+              } else {
+                # ANOVA for 3+ levels
+                lm_fit <- lm(as.formula(formula_str), data = group_data_cov)
+                aov_result <- anova(lm_fit)
+                
+                # Get group means
+                group_means <- group_data_cov %>%
+                  group_by(!!sym(cov)) %>%
+                  summarise(mean = mean(!!sym(.x), na.rm = TRUE), 
+                           sd = sd(!!sym(.x), na.rm = TRUE),
+                           .groups = "drop")
+                
+                tibble(
+                  Biomarker = .x,
+                  F_statistic = aov_result[1, "F value"],
+                  p.value = aov_result[1, "Pr(>F)"],
+                  method = "ANOVA",
+                  group_info = paste(group_means[[cov]], "=", 
+                                    round(group_means$mean, 3), collapse = "; ")
+                )
+              }
+            }, error = function(e) {
+              tibble(Biomarker = .x, statistic = NA, p.value = NA, 
+                     method = "error", group_info = NA)
+            })
+          }
+        )
+        
+        # Pairwise comparisons for significant ANOVA results
+        if (n_levels > 2) {
+          sig_biomarkers_anova <- results_cov %>%
+            mutate(FDR_temp = p.adjust(p.value, method = "fdr")) %>%
+            filter(FDR_temp < fdr_threshold) %>%
+            pull(Biomarker)
+          
+          if (length(sig_biomarkers_anova) > 0) {
+            pairwise_list <- map_df(sig_biomarkers_anova, ~ {
+              tryCatch({
+                pw <- pairwise.t.test(group_data_cov[[.x]], group_data_cov[[cov]], 
+                                      p.adjust.method = "bonferroni")
+                
+                # Convert to tidy format
+                pw_tidy <- as.data.frame(pw$p.value) %>%
+                  rownames_to_column("group1") %>%
+                  pivot_longer(-group1, names_to = "group2", values_to = "p.value") %>%
+                  filter(!is.na(p.value)) %>%
+                  mutate(
+                    Biomarker = .x,
+                    Group = i,
+                    Covariate = cov
+                  )
+                
+                pw_tidy
+              }, error = function(e) {
+                tibble(
+                  Biomarker = .x,
+                  group1 = NA_character_,
+                  group2 = NA_character_,
+                  p.value = NA_real_,
+                  Group = i,
+                  Covariate = cov
+                )
+              })
+            })
+            
+            pairwise_results[[paste0("Group", i, "_", cov)]] <- pairwise_list
+          }
+        }
+        
+      } else {
+        # Continuous covariate - use linear regression
+        results_cov <- map_df(
+          biomarkers,
+          ~ {
+            tryCatch({
+              protected_biomarker <- protect_name(.x)
+              protected_cov <- protect_name(cov)
+              formula_str <- paste(protected_biomarker, "~", protected_cov)
+              
+              lm_fit <- lm(as.formula(formula_str), data = group_data_cov)
+              tidy(lm_fit) %>% 
+                filter(term == cov | term == protected_cov) %>%
+                mutate(Biomarker = .x, method = "Linear Regression") %>%
+                select(Biomarker, estimate, statistic, p.value, method)
+            }, error = function(e) {
+              tibble(Biomarker = .x, estimate = NA, statistic = NA, 
+                     p.value = NA, method = "error")
+            })
+          }
+        )
+      }
+      
+      # Add FDR correction
+      results_cov <- results_cov %>%
+        arrange(p.value) %>%
+        mutate(FDR = p.adjust(p.value, method = "fdr"))
+      
+      # Store results
+      all_results[[paste0("Group", i, "_", cov)]] <- results_cov %>%
+        mutate(Group = i, Covariate = cov)
+  
+      if (print_tables == TRUE) {    
+      # Display table
+      if (is_categorical && n_levels == 2) {
+        header_text <- paste("T-test for association with", cov)
+        display_cols <- c("Biomarker", "statistic", "p.value", "FDR", "mean_diff", "group_info")
+      } else if (is_categorical) {
+        header_text <- paste("ANOVA for association with", cov)
+        display_cols <- c("Biomarker", "F_statistic", "p.value", "FDR", "group_info")
+      } else {
+        header_text <- paste("Linear Regression for", cov, "association")
+        display_cols <- c("Biomarker", "estimate", "statistic", "p.value", "FDR")
+      }
+      
+      results_display <- results_cov %>% select(any_of(display_cols))
+      
+      print(
+        results_display %>%
+          kbl(format = "html", digits = 4) %>%
+          add_header_above(setNames(ncol(results_display), header_text)) %>%
+          kable_styling(
+            bootstrap_options = c("striped", "hover", "condensed"),
+            full_width = FALSE
+          )
+      )
+      
+      cat("\n\n")
+      
+      # Print pairwise comparisons for significant ANOVA results
+      
+      if (is_categorical && n_levels > 2 && paste0("Group", i, "_", cov) %in% names(pairwise_results)) {
+        cat("\n**Pairwise comparisons (Bonferroni-adjusted) for significant biomarkers:**\n\n")
+        
+        pw_display <- pairwise_results[[paste0("Group", i, "_", cov)]] %>%
+          select(Biomarker, group1, group2, p.value) %>%
+          arrange(Biomarker, p.value)
+        
+        print(
+          pw_display %>%
+            kbl(format = "html", digits = 4) %>%
+            kable_styling(
+              bootstrap_options = c("striped", "hover", "condensed"),
+              full_width = FALSE
+            )
+        )
+        
+        cat("\n\n")
+      }
+      }
+      
+     # Plots for significant associations
+      sig_biomarkers <- results_cov %>% 
+        filter(FDR < fdr_threshold) %>% 
+        pull(Biomarker)
+      
+      if (length(sig_biomarkers) > 0) {
+        cat("\n**Significant", cov, "Associations (FDR <", fdr_threshold, "):** ", 
+            length(sig_biomarkers), "biomarkers\n\n")
+        
+        # Split into pages
+        n_pages <- ceiling(length(sig_biomarkers) / max_plots_per_page)
+        
+        for (page in 1:n_pages) {
+          start_idx <- (page - 1) * max_plots_per_page + 1
+          end_idx <- min(page * max_plots_per_page, length(sig_biomarkers))
+          page_biomarkers <- sig_biomarkers[start_idx:end_idx]
+         
+           
+          if (n_pages > 1) {
+            cat("\n*Page", page, "of", n_pages, "*\n\n")
+          }
+          
+          if (is_categorical) {
+            
+            # Create statistics labels INSIDE the loop
+stat_labels <- results_cov %>%
+  filter(Biomarker %in% page_biomarkers)
+
+# Check which columns exist
+if ("statistic" %in% names(stat_labels)) {
+  stat_labels <- stat_labels %>%
+    mutate(label = sprintf("t=%.2f, p=%.2e", statistic, p.value))
+} else if ("F_statistic" %in% names(stat_labels)) {
+  stat_labels <- stat_labels %>%
+    mutate(label = sprintf("F=%.2f, p=%.2e", F_statistic, p.value))
+}
+
+stat_labels <- stat_labels %>% select(Biomarker, label)
+
+            # Vertical boxplots for categorical covariates
+            plot_data <- group_data_cov %>%
+              select(all_of(c(cov, page_biomarkers))) %>%
+              pivot_longer(cols = all_of(page_biomarkers),
+                           names_to = "Biomarker",
+                           values_to = "Value")
+            
+            p <- ggplot(plot_data, aes(x = .data[[cov]], y = Value, fill = .data[[cov]])) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 16, outlier.size = 1) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+  geom_text(data = stat_labels, 
+            aes(x = Inf, y = Inf, label = label),
+            hjust = 1.05, vjust = 1.5, 
+            size = 2.5, inherit.aes = FALSE) +
+  facet_wrap(~ Biomarker, scales = "free_y", ncol = 3) +
+              theme_minimal() +
+              theme(
+                strip.text = element_text(face = "bold", size = 9),
+                axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+                legend.position = "bottom"
+              ) +
+              labs(
+                title = paste("Group", i, "-", cov, "Associations (FDR <", fdr_threshold, ")"),
+                x = cov,
+                y = "Biomarker Value"
+              )
+            
+            # Add custom colors for common covariates
+            if (cov == "sex" && all(levels(group_data_cov[[cov]]) %in% c("F", "M"))) {
+              p <- p + scale_fill_manual(values = c("F" = "#E69F00", "M" = "#56B4E9"))
+            }
+            
+            print(p)
+            cat("\n\n")
+            
+          } else {
+            # Scatter plots for continuous covariates
+            plots <- lapply(page_biomarkers, function(biom) {
+  plot_data <- group_data_cov %>%
+    select(all_of(c(cov, biom)))
+  
+  names(plot_data) <- c("x_var", "y_var")
+  
+  # Get statistics
+  stat_row <- results_cov %>% filter(Biomarker == biom)
+  
+  ggplot(plot_data, aes(x = x_var, y = y_var)) +
+    geom_point(alpha = 0.5, color = "steelblue", size = 1.5) +
+    geom_smooth(method = "lm", se = TRUE, color = "red", 
+               fill = "pink", alpha = 0.3) +
+    theme_minimal() +
+    labs(
+      title = biom,
+      subtitle = sprintf("β=%.3f, t=%.2f, p=%.2e, FDR=%.2e", 
+                        stat_row$estimate, stat_row$statistic,
+                        stat_row$p.value, stat_row$FDR),
+      x = cov,
+      y = "Value"
+    ) +
+    theme(
+      plot.title = element_text(face = "bold", size = 9),
+      plot.subtitle = element_text(size = 7),
+      axis.title = element_text(size = 8),
+      axis.text = element_text(size = 7)
+    )
+})
+            
+            n_cols <- min(3, length(plots))
+            do.call(grid.arrange, c(plots, ncol = n_cols, 
+                                   top = paste("Group", i, "-", cov, 
+                                             "Associations (FDR <", fdr_threshold, 
+                                             ") - Page", page)))
+            cat("\n\n")
+          }
+        }
+      } else {
+        cat("\n*No significant", cov, "associations at FDR <", fdr_threshold, "*\n\n")
+      }
+    }
+    
+    cat("\n---\n\n")
+  }
+  
+  # Combine all results
+  if (length(all_results) > 0) {
+    combined_results <- bind_rows(all_results)
+    pairwise_combined <- if(length(pairwise_results) > 0) {
+      bind_rows(pairwise_results)
+    } else {
+      NULL
+    }
+    
+    return(invisible(list(
+      omnibus = combined_results,
+      pairwise = pairwise_combined
+    )))
+  } else {
+    return(invisible(NULL))
+  }
+}
+
+
+#Combine Run and Bay
+meta_plus_race_dx <- meta_plus_race_dx %>%
+  mutate(Run_Bay = paste(Run, Bay, sep = "_"))
+
+#No AFDC 
+meta_plus_race_dx_noAFDC <- meta_plus_race_dx %>%
+  filter(Group=="AA" | Group=="HI")
+
+#Filter AA and AFDC 
+meta_plus_race_dx_bl <- meta_plus_race_dx %>%
+  filter(Group=="AA" | Group=="AFDC")
+
+meta_plus_race_dx_bl_nci <- meta_plus_race_dx_bl %>%
+  filter(CDX=="NCI")
+
+# results <- test_covariate_associations(
+#   meta_plus_race_dx,
+#   biomarker_groups,
+#   covariates = c("Run","Bay","Race_Ethnicity","sex", "age_at_sample", "CDX"),fdr_threshold = 0.00001
+# )
+
+# cat("\n### *In Overall Sample*\n\n")
+# results <- test_covariate_associations(
+#   meta_plus_race_dx,
+#   biomarker_groups,
+#   covariates = c("Race_Ethnicity", "CDX"),fdr_threshold = 0.05, biomarkers_to_test = NULL, print_tables = TRUE)
+
+cat("\n### *No AfDC or MU_HI, NCI only*\n\n")
+results <- test_covariate_associations(
+  meta_plus_race_dx_noAFDC %>%
+  filter(CDX=="NCI")%>%
+  filter(!Race=="MU"),
+  biomarker_groups,
+  covariates = c("Race_Ethnicity"),fdr_threshold = 0.01, biomarkers_to_test = NULL, print_tables = TRUE)
+
+
+# cat("\n### *In Black Only*\n\n")
+# results <- test_covariate_associations(
+#   meta_plus_race_dx_bl,
+#   biomarker_groups,
+#   covariates = c("Race_Ethnicity", "CDX"),fdr_threshold = 0.05, biomarkers_to_test = NULL, print_tables = TRUE)
+
+# cat("\n*Country/State Effects for AA and AFDC in NCI*\n\n")
+#  results <- test_covariate_associations(
+#    meta_plus_race_dx_bl_nci,
+#    biomarker_groups,
+#    covariates = c("Country/State"),
+#    fdr_threshold = 0.00001,
+#    max_plots_per_page = 1
+#  )
+  # Access results
+  # sig_with_run <- results %>% 
+  #   filter(Covariate == "Run", FDR < 0.00001)
+# sig_with_age <- results %>% 
+#   filter(Covariate == "age_at_sample", FDR < 0.01)
+# sig_with_race <- results %>% 
+#   filter(Covariate == "Race_Ethnicity", FDR < 0.01)
+# sig_with_cdx <- results %>% 
+#   filter(Covariate == "CDX", FDR < 0.01)
+# 
+# knitr::kable(sig_with_race)
+# knitr::kable(sig_with_sex)
+# knitr::kable(sig_with_age)
+# knitr::kable(sig_with_cdx)
+
+# Export
+#write.csv(results, "covariate_associations.csv", row.names = FALSE)
+
+
+```
+
+
+## D.2 Plate Effects
+
+```{r plate_assoc, eval=FALSE, echo=TRUE, message=FALSE, warning=FALSE, results='asis',fig.width=12, fig.height=12 }
+
+test_covariate_associations_specific <- function(meta_plus, 
+                                       biomarkers = NULL,
+                                       covariates = c("sex", "age_at_sample"),
+                                       color_by = NULL,
+                                       fdr_threshold = 0.05,
+                                       max_plots_per_page = 6,
+                                       min_group_n = 5) {  # NEW PARAMETER
+  
+  # Helper function to protect variable names
+  protect_name <- function(name) {
+    if (grepl("[^a-zA-Z0-9_.]", name)) {
+      return(paste0("`", name, "`"))
+    }
+    return(name)
+  }
+  
+  # Check if biomarkers exist in data
+  missing_biomarkers <- setdiff(biomarkers, names(meta_plus))
+  if (length(missing_biomarkers) > 0) {
+    warning("The following biomarkers not found in data: ", 
+            paste(missing_biomarkers, collapse = ", "))
+    biomarkers <- intersect(biomarkers, names(meta_plus))
+  }
+  
+  if (length(biomarkers) == 0) {
+    stop("No valid biomarkers specified")
+  }
+  
+  # Select necessary columns
+  essential_cols <- unique(c("SampleID", covariates, color_by, biomarkers))
+  data_subset <- meta_plus %>% 
+    select(all_of(essential_cols))
+  
+  # Initialize results storage
+  all_results <- list()
+  pairwise_results <- list()  # NEW: store pairwise comparisons
+  
+  # Loop through each covariate
+  for (cov in covariates) {
+    cat("\n### Association with", cov, "\n\n")
+    
+    # Check if covariate exists
+    if (!cov %in% names(data_subset)) {
+      cat("*Skipping", cov, "- column not found in data*\n\n")
+      next
+    }
+    
+    # Filter for complete cases on this covariate
+    data_cov <- data_subset %>%
+      filter(!is.na(!!sym(cov)))
+    
+    # Check if we have any data left
+    if (nrow(data_cov) == 0) {
+      cat("*Skipping", cov, "- no complete cases*\n\n")
+      next
+    }
+    
+    # Convert to factor if character
+    if (is.character(data_cov[[cov]])) {
+      data_cov[[cov]] <- factor(data_cov[[cov]])
+    }
+    
+    # Determine test type based on covariate type
+    is_categorical <- is.factor(data_cov[[cov]]) || 
+                     is.character(data_cov[[cov]])
+    
+    if (is_categorical) {
+      # NEW: Filter groups by minimum sample size
+      group_counts <- table(data_cov[[cov]])
+      valid_groups <- names(group_counts[group_counts >= min_group_n])
+      
+      if (length(valid_groups) < length(group_counts)) {
+        excluded <- setdiff(names(group_counts), valid_groups)
+        cat("*Excluding groups with n <", min_group_n, ":", 
+            paste(paste0(excluded, " (n=", group_counts[excluded], ")"), collapse=", "), "*\n\n")
+      }
+      
+      data_cov <- data_cov %>% filter(.data[[cov]] %in% valid_groups)
+      data_cov[[cov]] <- droplevels(data_cov[[cov]])
+      
+      n_levels <- length(unique(data_cov[[cov]]))
+      
+      if (n_levels < 2) {
+        cat("*Skipping", cov, "- fewer than 2 valid groups*\n\n")
+        next
+      }
+      
+      # NEW: Print group sample sizes
+      cat("**Group sizes:**", paste(names(group_counts[valid_groups]), "=", 
+                                     group_counts[valid_groups], collapse=", "), "\n\n")
+      
+      # Run tests
+      results_cov <- map_df(
+        biomarkers,
+        ~ {
+          tryCatch({
+            protected_biomarker <- protect_name(.x)
+            protected_cov <- protect_name(cov)
+            formula_str <- paste(protected_biomarker, "~", protected_cov)
+            
+            if (n_levels == 2) {
+              # T-test for binary variables
+              tb <- t.test(as.formula(formula_str), data = data_cov)
+              
+              # NEW: Get group means
+              group_means <- data_cov %>%
+                group_by(!!sym(cov)) %>%
+                summarise(mean = mean(!!sym(.x), na.rm = TRUE), .groups = "drop")
+              
+              tibble(
+                Biomarker = .x,
+                statistic = tb$statistic,
+                p.value = tb$p.value,
+                method = "t-test",
+                mean_diff = diff(group_means$mean),  # NEW
+                group_info = paste(group_means[[cov]], "=", 
+                                  round(group_means$mean, 3), collapse = "; ")  # NEW
+              )
+            } else {
+              # ANOVA for 3+ levels
+              lm_fit <- lm(as.formula(formula_str), data = data_cov)
+              aov_result <- anova(lm_fit)
+              
+              # NEW: Get group means
+              group_means <- data_cov %>%
+                group_by(!!sym(cov)) %>%
+                summarise(mean = mean(!!sym(.x), na.rm = TRUE), 
+                         sd = sd(!!sym(.x), na.rm = TRUE),
+                         .groups = "drop")
+              
+              tibble(
+                Biomarker = .x,
+                F_statistic = aov_result[1, "F value"],
+                p.value = aov_result[1, "Pr(>F)"],
+                method = "ANOVA",
+                group_info = paste(group_means[[cov]], "=", 
+                                  round(group_means$mean, 3), collapse = "; ")  # NEW
+              )
+            }
+          }, error = function(e) {
+            tibble(Biomarker = .x, statistic = NA, p.value = NA, 
+                   method = "error", group_info = NA)
+          })
+        }
+      )
+      
+      # NEW: Pairwise comparisons for significant ANOVA results
+      if (n_levels > 2) {
+        sig_biomarkers_anova <- results_cov %>%
+          mutate(FDR_temp = p.adjust(p.value, method = "fdr")) %>%
+          filter(FDR_temp < fdr_threshold) %>%
+          pull(Biomarker)
+        
+        if (length(sig_biomarkers_anova) > 0) {
+          pairwise_list <- map(sig_biomarkers_anova, ~ {
+            protected_biomarker <- protect_name(.x)
+            protected_cov <- protect_name(cov)
+            formula_str <- paste(protected_biomarker, "~", protected_cov)
+            
+            pw <- pairwise.t.test(data_cov[[.x]], data_cov[[cov]], 
+                                  p.adjust.method = "bonferroni")
+            
+            # Convert to tidy format
+            pw_tidy <- as.data.frame(pw$p.value) %>%
+              rownames_to_column("group1") %>%
+              pivot_longer(-group1, names_to = "group2", values_to = "p.value") %>%
+              filter(!is.na(p.value)) %>%
+              mutate(Biomarker = .x)
+            
+            pw_tidy
+          })
+          
+          pairwise_results[[cov]] <- bind_rows(pairwise_list)
+        }
+      }
+      
+    } else {
+      # Continuous covariate - use linear regression
+      results_cov <- map_df(
+        biomarkers,
+        ~ {
+          tryCatch({
+            protected_biomarker <- protect_name(.x)
+            protected_cov <- protect_name(cov)
+            formula_str <- paste(protected_biomarker, "~", protected_cov)
+            
+            lm_fit <- lm(as.formula(formula_str), data = data_cov)
+            tidy(lm_fit) %>% 
+              filter(term == cov | term == protected_cov) %>%
+              mutate(Biomarker = .x, method = "Linear Regression") %>%
+              select(Biomarker, estimate, statistic, p.value, method)
+          }, error = function(e) {
+            tibble(Biomarker = .x, estimate = NA, statistic = NA, 
+                   p.value = NA, method = "error")
+          })
+        }
+      )
+    }
+    
+    # Add FDR correction
+    results_cov <- results_cov %>%
+      arrange(p.value) %>%
+      mutate(FDR = p.adjust(p.value, method = "fdr"))
+    
+    # Store results
+    all_results[[cov]] <- results_cov %>%
+      mutate(Covariate = cov)
+    
+    # Display table
+    if (is_categorical && n_levels == 2) {
+      header_text <- paste("T-test for association with", cov)
+      display_cols <- c("Biomarker", "statistic", "p.value", "FDR", "mean_diff")
+    } else if (is_categorical) {
+      header_text <- paste("ANOVA for association with", cov)
+      display_cols <- c("Biomarker", "F_statistic", "p.value", "FDR")
+    } else {
+      header_text <- paste("Linear Regression for", cov, "association")
+      display_cols <- c("Biomarker", "estimate", "statistic", "p.value", "FDR")
+    }
+    
+    results_display <- results_cov %>% select(any_of(display_cols))
+    
+    print(
+      results_display %>%
+        kbl(format = "html", digits = 4) %>%
+        add_header_above(setNames(ncol(results_display), header_text)) %>%
+        kable_styling(
+          bootstrap_options = c("striped", "hover", "condensed"),
+          full_width = FALSE
+        )
+    )
+    
+    cat("\n\n")
+    
+    # NEW: Print pairwise comparisons for significant ANOVA results
+    if (is_categorical && n_levels > 2 && cov %in% names(pairwise_results)) {
+      cat("\n**Pairwise comparisons (Bonferroni-adjusted) for significant biomarkers:**\n\n")
+      
+      pw_display <- pairwise_results[[cov]] %>%
+        arrange(Biomarker, p.value)
+      
+      print(
+        pw_display %>%
+          kbl(format = "html", digits = 4) %>%
+          kable_styling(
+            bootstrap_options = c("striped", "hover", "condensed"),
+            full_width = FALSE
+          )
+      )
+      
+      cat("\n\n")
+    }
+    
+    # Plots for significant associations
+    sig_biomarkers <- results_cov %>% 
+      filter(FDR < fdr_threshold) %>% 
+      pull(Biomarker)
+    
+    if (length(sig_biomarkers) > 0) {
+      cat("\n**Significant", cov, "Associations (FDR <", fdr_threshold, "):** ", 
+          length(sig_biomarkers), "biomarkers\n\n")
+      
+      # Split into pages
+      n_pages <- ceiling(length(sig_biomarkers) / max_plots_per_page)
+      
+      for (page in 1:n_pages) {
+        start_idx <- (page - 1) * max_plots_per_page + 1
+        end_idx <- min(page * max_plots_per_page, length(sig_biomarkers))
+        page_biomarkers <- sig_biomarkers[start_idx:end_idx]
+        
+        if (n_pages > 1) {
+          cat("\n*Page", page, "of", n_pages, "*\n\n")
+        }
+        
+        if (is_categorical) {
+          # Boxplots for categorical covariates
+          select_cols <- c(cov, page_biomarkers)
+          if (!is.null(color_by) && color_by %in% names(data_cov)) {
+            select_cols <- c(select_cols, color_by)
+          }
+          
+          plot_data <- data_cov %>%
+            select(all_of(select_cols)) %>%
+            pivot_longer(cols = all_of(page_biomarkers),
+                         names_to = "Biomarker",
+                         values_to = "Value")
+          
+          # Create base plot
+          if (!is.null(color_by) && color_by %in% names(plot_data)) {
+            if (is.character(plot_data[[color_by]])) {
+              plot_data[[color_by]] <- factor(plot_data[[color_by]])
+            }
+            
+            p <- ggplot(plot_data, aes(y = .data[[cov]], x = Value, fill = .data[[color_by]])) +
+              geom_boxplot(alpha = 0.7, outlier.shape = 16, outlier.size = 1, 
+                          position = position_dodge(0.8)) +
+              geom_point(aes(color = .data[[color_by]]), 
+                        position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+                        alpha = 0.4, size = 1) +
+              labs(fill = color_by, color = color_by)
+          } else {
+            p <- ggplot(plot_data, aes(x = .data[[cov]], y = Value, fill = .data[[cov]])) +
+              geom_boxplot(alpha = 0.7, outlier.shape = 16, outlier.size = 1) +
+              geom_jitter(width = 0.2, alpha = 0.3, size = 1)
+          }
+          
+          p <- p +
+            facet_wrap(~ Biomarker, scales = "free_y", ncol = 3) +
+            theme_minimal() +
+            theme(
+              strip.text = element_text(face = "bold", size = 9),
+              axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+              legend.position = "bottom"
+            ) +
+            labs(
+              title = paste(cov, "Associations (FDR <", fdr_threshold, ")"),
+              x = cov,
+              y = "Biomarker Value"
+            )
+          
+          if (is.null(color_by) || color_by == cov) {
+            if (cov == "sex" && all(levels(data_cov[[cov]]) %in% c("F", "M"))) {
+              p <- p + scale_fill_manual(values = c("F" = "#E69F00", "M" = "#56B4E9"))
+            } else if (cov == "CDX_grouped") {
+              p <- p + scale_fill_manual(
+                values = c("NCI" = "#2ECC71", "MCI" = "#F39C12", "AD" = "#E74C3C")
+              )
+            }
+          }
+          
+          print(p)
+          cat("\n\n")
+          
+        } else {
+          # Histograms for continuous covariates
+          plots <- lapply(page_biomarkers, function(biom) {
+            select_cols <- c(cov, biom)
+            if (!is.null(color_by) && color_by %in% names(data_cov)) {
+              select_cols <- c(select_cols, color_by)
+            }
+            
+            plot_data <- data_cov %>%
+              select(all_of(select_cols))
+            
+            names(plot_data)[names(plot_data) == cov] <- "x_var"
+            names(plot_data)[names(plot_data) == biom] <- "y_var"
+            
+            fdr_val <- results_cov %>% 
+              filter(Biomarker == biom) %>% 
+              pull(FDR)
+            
+            if (!is.null(color_by) && color_by %in% names(plot_data)) {
+              if (is.character(plot_data[[color_by]])) {
+                plot_data[[color_by]] <- factor(plot_data[[color_by]])
+              }
+              
+              p <- ggplot(plot_data, aes(x = y_var, fill = .data[[color_by]])) +
+                geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+                labs(fill = color_by)
+              
+              if (color_by == "sex") {
+                p <- p + scale_fill_manual(values = c("F" = "#E69F00", "M" = "#56B4E9"))
+              } else if (color_by == "CDX_grouped") {
+                p <- p + scale_fill_manual(
+                  values = c("NCI" = "#2ECC71", "MCI" = "#F39C12", "AD" = "#E74C3C")
+                )
+              }
+            } else {
+              p <- ggplot(plot_data, aes(x = y_var)) +
+                geom_histogram(fill = "steelblue", alpha = 0.7, bins = 30)
+            }
+            
+            p <- p +
+              theme_minimal() +
+              labs(
+                title = biom,
+                subtitle = paste0("Association with ", cov, 
+                                ", FDR = ", format(fdr_val, digits = 3, scientific = TRUE)),
+                x = "Biomarker Value",
+                y = "Count"
+              ) +
+              theme(
+                plot.title = element_text(face = "bold", size = 9),
+                plot.subtitle = element_text(size = 7),
+                axis.title = element_text(size = 8),
+                axis.text = element_text(size = 7),
+                legend.position = "bottom",
+                legend.title = element_text(size = 7),
+                legend.text = element_text(size = 6)
+              )
+            
+            return(p)
+          })
+          
+          n_cols <- min(3, length(plots))
+          do.call(grid.arrange, c(plots, ncol = n_cols, 
+                                 top = paste(cov, "Associations (FDR <", 
+                                           fdr_threshold, ") - Page", page)))
+          cat("\n\n")
+        }
+      }
+    } else {
+      cat("\n*No significant", cov, "associations at FDR <", fdr_threshold, "*\n\n")
+    }
+    
+    cat("\n---\n\n")
+  }
+  
+  # Combine all results
+  if (length(all_results) > 0) {
+    combined_results <- bind_rows(all_results)
+    return(invisible(list(
+      omnibus = combined_results,
+      pairwise = if(length(pairwise_results) > 0) bind_rows(pairwise_results, .id = "Covariate") else NULL
+    )))
+  } else {
+    return(invisible(NULL))
+  }
+}
+# # Function to test biomarker associations with specified covariates
+# test_covariate_associations_specific <- function(meta_plus, 
+#                                        biomarkers = NULL,
+#                                        covariates = c("sex", "age_at_sample"),
+#                                        color_by = NULL,
+#                                        fdr_threshold = 0.05,
+#                                        max_plots_per_page = 6) {
+#   
+#   # Helper function to protect variable names
+#   protect_name <- function(name) {
+#     if (grepl("[^a-zA-Z0-9_.]", name)) {
+#       return(paste0("`", name, "`"))
+#     }
+#     return(name)
+#   }
+#   
+#   # Check if biomarkers exist in data
+#   missing_biomarkers <- setdiff(biomarkers, names(meta_plus))
+#   if (length(missing_biomarkers) > 0) {
+#     warning("The following biomarkers not found in data: ", 
+#             paste(missing_biomarkers, collapse = ", "))
+#     biomarkers <- intersect(biomarkers, names(meta_plus))
+#   }
+#   
+#   if (length(biomarkers) == 0) {
+#     stop("No valid biomarkers specified")
+#   }
+#   
+#   # Select necessary columns
+#   essential_cols <- unique(c("SampleID", covariates, color_by, biomarkers))
+#   data_subset <- meta_plus %>% 
+#     select(all_of(essential_cols))
+#   
+#   # Initialize results storage
+#   all_results <- list()
+#   
+#   # Loop through each covariate
+#   for (cov in covariates) {
+#     cat("\n### Association with", cov, "\n\n")
+#     
+#     # Check if covariate exists
+#     if (!cov %in% names(data_subset)) {
+#       cat("*Skipping", cov, "- column not found in data*\n\n")
+#       next
+#     }
+#     
+#     # Filter for complete cases on this covariate
+#     data_cov <- data_subset %>%
+#       filter(!is.na(!!sym(cov)))
+#     
+#     # Check if we have any data left
+#     if (nrow(data_cov) == 0) {
+#       cat("*Skipping", cov, "- no complete cases*\n\n")
+#       next
+#     }
+#     
+#     # Convert to factor if character
+#     if (is.character(data_cov[[cov]])) {
+#       data_cov[[cov]] <- factor(data_cov[[cov]])
+#     }
+#     
+#     # Determine test type based on covariate type
+#     is_categorical <- is.factor(data_cov[[cov]]) || 
+#                      is.character(data_cov[[cov]])
+#     
+#     if (is_categorical) {
+#       # Categorical covariate - use ANOVA or t-test
+#       n_levels <- length(unique(data_cov[[cov]]))
+#       
+#       if (n_levels < 2) {
+#         cat("*Skipping", cov, "- only", n_levels, "level(s)*\n\n")
+#         next
+#       }
+#       
+#       # Run tests
+#       results_cov <- map_df(
+#         biomarkers,
+#         ~ {
+#           tryCatch({
+#             protected_biomarker <- protect_name(.x)
+#             protected_cov <- protect_name(cov)
+#             formula_str <- paste(protected_biomarker, "~", protected_cov)
+#             
+#             if (n_levels == 2) {
+#               # T-test for binary variables
+#               tb <- t.test(as.formula(formula_str), data = data_cov)
+#               tibble(
+#                 Biomarker = .x,
+#                 statistic = tb$statistic,
+#                 p.value = tb$p.value,
+#                 method = "t-test"
+#               )
+#             } else {
+#               # ANOVA for 3+ levels
+#               lm_fit <- lm(as.formula(formula_str), data = data_cov)
+#               aov_result <- anova(lm_fit)
+#               tibble(
+#                 Biomarker = .x,
+#                 F_statistic = aov_result[1, "F value"],
+#                 p.value = aov_result[1, "Pr(>F)"],
+#                 method = "ANOVA"
+#               )
+#             }
+#           }, error = function(e) {
+#             tibble(Biomarker = .x, statistic = NA, p.value = NA, method = "error")
+#           })
+#         }
+#       )
+#       
+#     } else {
+#       # Continuous covariate - use linear regression
+#       results_cov <- map_df(
+#         biomarkers,
+#         ~ {
+#           tryCatch({
+#             protected_biomarker <- protect_name(.x)
+#             protected_cov <- protect_name(cov)
+#             formula_str <- paste(protected_biomarker, "~", protected_cov)
+#             
+#             lm_fit <- lm(as.formula(formula_str), data = data_cov)
+#             tidy(lm_fit) %>% 
+#               filter(term == cov | term == protected_cov) %>%
+#               mutate(Biomarker = .x, method = "Linear Regression") %>%
+#               select(Biomarker, estimate, statistic, p.value, method)
+#           }, error = function(e) {
+#             tibble(Biomarker = .x, estimate = NA, statistic = NA, 
+#                    p.value = NA, method = "error")
+#           })
+#         }
+#       )
+#     }
+#     
+#     # Add FDR correction
+#     results_cov <- results_cov %>%
+#       arrange(p.value) %>%
+#       mutate(FDR = p.adjust(p.value, method = "fdr"))
+#     
+#     # Store results
+#     all_results[[cov]] <- results_cov %>%
+#       mutate(Covariate = cov)
+#     
+#     # Display table
+#     if (is_categorical && n_levels == 2) {
+#       header_text <- paste("T-test for association with", cov)
+#       display_cols <- c("Biomarker", "statistic", "p.value", "FDR")
+#     } else if (is_categorical) {
+#       header_text <- paste("ANOVA for association with", cov)
+#       display_cols <- c("Biomarker", "F_statistic", "p.value", "FDR")
+#     } else {
+#       header_text <- paste("Linear Regression for", cov, "association")
+#       display_cols <- c("Biomarker", "estimate", "statistic", "p.value", "FDR")
+#     }
+#     
+#     results_display <- results_cov %>% select(any_of(display_cols))
+#     
+#     print(
+#       results_display %>%
+#         kbl(format = "html", digits = 4) %>%
+#         add_header_above(setNames(ncol(results_display), header_text)) %>%
+#         kable_styling(
+#           bootstrap_options = c("striped", "hover", "condensed"),
+#           full_width = FALSE
+#         )
+#     )
+#     
+#     cat("\n\n")
+#     
+#     # Plots for significant associations
+#     sig_biomarkers <- results_cov %>% 
+#       filter(FDR < fdr_threshold) %>% 
+#       pull(Biomarker)
+#     
+#     if (length(sig_biomarkers) > 0) {
+#       cat("\n**Significant", cov, "Associations (FDR <", fdr_threshold, "):** ", 
+#           length(sig_biomarkers), "biomarkers\n\n")
+#       
+#       # Split into pages
+#       n_pages <- ceiling(length(sig_biomarkers) / max_plots_per_page)
+#       
+#       for (page in 1:n_pages) {
+#         start_idx <- (page - 1) * max_plots_per_page + 1
+#         end_idx <- min(page * max_plots_per_page, length(sig_biomarkers))
+#         page_biomarkers <- sig_biomarkers[start_idx:end_idx]
+#         
+#         if (n_pages > 1) {
+#           cat("\n*Page", page, "of", n_pages, "*\n\n")
+#         }
+#         
+#         if (is_categorical) {
+#           # Boxplots for categorical covariates (vertical orientation)
+#           select_cols <- c(cov, page_biomarkers)
+#           if (!is.null(color_by) && color_by %in% names(data_cov)) {
+#             select_cols <- c(select_cols, color_by)
+#           }
+#           
+#           plot_data <- data_cov %>%
+#             select(all_of(select_cols)) %>%
+#             pivot_longer(cols = all_of(page_biomarkers),
+#                          names_to = "Biomarker",
+#                          values_to = "Value")
+#           
+#           # Create base plot
+#           if (!is.null(color_by) && color_by %in% names(plot_data)) {
+#             # Color by specified variable
+#             if (is.character(plot_data[[color_by]])) {
+#               plot_data[[color_by]] <- factor(plot_data[[color_by]])
+#             }
+#             
+#             p <- ggplot(plot_data, aes(y = .data[[cov]], x = Value, fill = .data[[color_by]])) +
+#               geom_boxplot(alpha = 0.7, outlier.shape = 16, outlier.size = 1, 
+#                           position = position_dodge(0.8)) +
+#               geom_point(aes(color = .data[[color_by]]), 
+#                         position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+#                         alpha = 0.4, size = 1) +
+#               labs(fill = color_by, color = color_by)
+#           } else {
+#             # Color by covariate itself
+#             p <- ggplot(plot_data, aes(x = .data[[cov]], y = Value, fill = .data[[cov]])) +
+#               geom_boxplot(alpha = 0.7, outlier.shape = 16, outlier.size = 1) +
+#               geom_jitter(width = 0.2, alpha = 0.3, size = 1)
+#           }
+#           
+#           p <- p +
+#             facet_wrap(~ Biomarker, scales = "free_y", ncol = 3) +
+#             theme_minimal() +
+#             theme(
+#               strip.text = element_text(face = "bold", size = 9),
+#               axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+#               legend.position = "bottom"
+#             ) +
+#             labs(
+#               title = paste(cov, "Associations (FDR <", fdr_threshold, ")"),
+#               x = cov,
+#               y = "Biomarker Value"
+#             )
+#           
+#           # Add custom colors for common covariates
+#           if (is.null(color_by) || color_by == cov) {
+#             if (cov == "sex" && all(levels(data_cov[[cov]]) %in% c("F", "M"))) {
+#               p <- p + scale_fill_manual(values = c("F" = "#E69F00", "M" = "#56B4E9"))
+#             } else if (cov == "CDX_grouped") {
+#               p <- p + scale_fill_manual(
+#                 values = c("NCI" = "#2ECC71", "MCI" = "#F39C12", "AD" = "#E74C3C")
+#               )
+#             }
+#           }
+#           
+#           print(p)
+#           cat("\n\n")
+#           
+#         } else {
+#           # Histograms for continuous covariates (vertical orientation)
+#           plots <- lapply(page_biomarkers, function(biom) {
+#             select_cols <- c(cov, biom)
+#             if (!is.null(color_by) && color_by %in% names(data_cov)) {
+#               select_cols <- c(select_cols, color_by)
+#             }
+#             
+#             plot_data <- data_cov %>%
+#               select(all_of(select_cols))
+#             
+#             names(plot_data)[names(plot_data) == cov] <- "x_var"
+#             names(plot_data)[names(plot_data) == biom] <- "y_var"
+#             
+#             fdr_val <- results_cov %>% 
+#               filter(Biomarker == biom) %>% 
+#               pull(FDR)
+#             
+#             # Create base plot with vertical orientation
+#             if (!is.null(color_by) && color_by %in% names(plot_data)) {
+#               if (is.character(plot_data[[color_by]])) {
+#                 plot_data[[color_by]] <- factor(plot_data[[color_by]])
+#               }
+#               
+#               p <- ggplot(plot_data, aes(x = y_var, fill = .data[[color_by]])) +
+#                 geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+#                 labs(fill = color_by)
+#               
+#               # Add custom colors for common variables
+#               if (color_by == "sex") {
+#                 p <- p + scale_fill_manual(values = c("F" = "#E69F00", "M" = "#56B4E9"))
+#               } else if (color_by == "CDX_grouped") {
+#                 p <- p + scale_fill_manual(
+#                   values = c("NCI" = "#2ECC71", "MCI" = "#F39C12", "AD" = "#E74C3C")
+#                 )
+#               }
+#             } else {
+#               p <- ggplot(plot_data, aes(x = y_var)) +
+#                 geom_histogram(fill = "steelblue", alpha = 0.7, bins = 30)
+#             }
+#             
+#             p <- p +
+#               theme_minimal() +
+#               labs(
+#                 title = biom,
+#                 subtitle = paste0("Association with ", cov, 
+#                                 ", FDR = ", format(fdr_val, digits = 3, scientific = TRUE)),
+#                 x = "Biomarker Value",
+#                 y = "Count"
+#               ) +
+#               theme(
+#                 plot.title = element_text(face = "bold", size = 9),
+#                 plot.subtitle = element_text(size = 7),
+#                 axis.title = element_text(size = 8),
+#                 axis.text = element_text(size = 7),
+#                 legend.position = "bottom",
+#                 legend.title = element_text(size = 7),
+#                 legend.text = element_text(size = 6)
+#               )
+#             
+#             return(p)
+#           })
+#           
+#           n_cols <- min(3, length(plots))
+#           do.call(grid.arrange, c(plots, ncol = n_cols, 
+#                                  top = paste(cov, "Associations (FDR <", 
+#                                            fdr_threshold, ") - Page", page)))
+#           cat("\n\n")
+#         }
+#       }
+#     } else {
+#       cat("\n*No significant", cov, "associations at FDR <", fdr_threshold, "*\n\n")
+#     }
+#     
+#     cat("\n---\n\n")
+#   }
+#   
+#   # Combine all results
+#   if (length(all_results) > 0) {
+#     combined_results <- bind_rows(all_results)
+#     return(invisible(combined_results))
+#   } else {
+#     return(invisible(NULL))
+#   }
+# }
+
+
+
+# Removing PLATES WITH FEW VALUES, 20251002-1810-Bay2 and 20251124-1407-Bay2
+# meta_filtered <- meta_plus_race_dx %>%
+#   filter(
+#     !(Run == "20251002-1810" & Bay == "Bay2"),
+#     !(Run == "20251124-1407" & Bay == "Bay2")
+#   )
+
+
+meta_filtered <- meta_plus_race_dx %>%
+  filter(
+    (Run == "20251125-1332" | Run == "20250806-1118")
+  )
+#my_biomarkers=sig_with_run$Biomarker
+#my_biomarkers=c("ANXA5", "PARK7", "NRGN", "BD-pTau-181", "TARDBP", "ARSA", "SOD1")
+#my_biomarkers=c(biomarker_groups[[8]], biomarker_groups[[5]])
+
+#cat("\n#### Colored by Race_Ethnicity \n\n")
+# results <- test_covariate_associations_specific(
+#   meta_plus_race_dx, 
+#   biomarkers=my_biomarkers,
+#   covariates = c("Run_Bay"),
+#   color_by = "Race_Ethnicity",
+#   max_plots_per_page=1,
+#   fdr_threshold =0.05
+# )  
+# results <- test_covariate_associations_specific(
+#   meta_filtered, 
+#   biomarkers=my_biomarkers,
+#   covariates = c("Run_Bay"),
+#   color_by = "Race_Ethnicity",
+#   max_plots_per_page=1,
+#   fdr_threshold =0.05
+# )  
+
+# my_biomarkers=c("PARK7", "ENO2", "PGF")
+# cat("\n## Bay Effects \n\n")
+# cat("\n### Colored by Bay \n\n")
+# results <- test_covariate_associations_specific(
+#   meta_filtered,
+#   biomarkers=my_biomarkers,
+#   covariates = c("Run_Bay"),
+#   color_by = "Bay",
+#   max_plots_per_page=1,
+#   fdr_threshold =0.00001
+# )
+# results <- test_covariate_associations_specific(
+#   meta_filtered,
+#   biomarkers=my_biomarkers,
+#   covariates = c("Run_Bay"),
+#   color_by = "Country/State",
+#   max_plots_per_page=1,
+#   fdr_threshold =0.00001
+# )
+# cat("\n### Colored by CDX \n\n")
+# results <- test_covariate_associations_specific(
+#   meta_filtered,
+#   biomarkers=my_biomarkers,
+#   covariates = c("Run_Bay"),
+#   color_by = "CDX",
+#   max_plots_per_page=1,
+#   fdr_threshold =0.00001
+# )
+
+my_biomarkers= unlist(biomarker_groups)
+cat("\n## Country Effects \n\n")
+cat("\n### Colored by Country/State \n\n")
+results <- test_covariate_associations_specific(
+  meta_filtered, 
+  biomarkers=my_biomarkers,
+  covariates = c("Country/State"),
+  color_by = "Country/State",
+  max_plots_per_page=1,
+  fdr_threshold =0.00001
+)  
+# cat("\n### Colored by Bay \n\n")
+# results <- test_covariate_associations_specific(
+#   meta_filtered, 
+#   biomarkers=my_biomarkers,
+#   covariates = c("Country/State"),
+#   color_by = "Bay",
+#   max_plots_per_page=1,
+#   fdr_threshold =0.00001
+# )  
+# cat("\n### Colored by CDX \n\n")
+# results <- test_covariate_associations_specific(
+#   meta_filtered, 
+#   biomarkers=my_biomarkers,
+#   covariates = c("Country/State"),
+#   color_by = "CDX",
+#   max_plots_per_page=1,
+#   fdr_threshold =0.00001
+# )  
+
+```
+
+# E. Notes
+* Park7 has notable Bay effects. Look at replicates.
+* Are there Run/Bay effects that we can adjust away?
+* There are differences among the African countries. Often all three are different. Seems as Tanzania is most different, but it depends on the biomarker Group.
+* Throw in some AA plates with my Africans
+* Try NCI only
+* ANXA5 has an M2 haplotype which is less common in AA and reduces expression. Could it be common in Tanzania?
