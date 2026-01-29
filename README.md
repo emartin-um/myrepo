@@ -8,6 +8,7 @@ R code for quality control and analysis of Alamar biomarker data for the U19 Alz
 ├── Primary_QC/           # Primary quality control analyses
 ├── Replicate_Analysis/   # Replicate sample concordance and CV analysis
 ├── U19_Analysis/         # U19 grant-specific association analyses
+├── Clustering/           # PCA and clustering analyses
 └── Utilities/            # Shared functions and helper scripts
 ```
 
@@ -38,6 +39,14 @@ Statistical analyses specific to the U19 grant objectives, including CDX associa
 
 Open `U19_Analysis/U19_Analysis.Rproj` in RStudio.
 
+### Clustering
+PCA and clustering analyses for dimensionality reduction, metadata associations, and outlier detection.
+
+**Scripts:**
+- `biomarker_pca_analysis.Rmd` - Comprehensive PCA with metadata association testing
+
+Open `Clustering/Clustering.Rproj` in RStudio.
+
 ### Utilities
 Shared R functions used across projects.
 
@@ -60,6 +69,9 @@ The recommended analysis order is:
       └── Produces: biomarker_groups.csv, meta_plus_race_dx.csv
    b. Interaction analysis second
       └── Produces: association results, interaction plots
+
+4. Clustering (optional, for exploratory analysis)
+   └── Produces: PCA scores, loadings, metadata associations, outliers
 ```
 
 ## Getting Started
@@ -114,25 +126,33 @@ install.packages(c(
 
   # Other utilities
   "poibin",
-  "irlba"
+  "irlba",
+
+  # PCA/Clustering
+  "FactoMineR",
+  "factoextra",
+  "scales"
 ))
 ```
 
 ### Package Summary by Project
 
-| Package | Primary_QC | Replicate | U19 | Description |
-|---------|:----------:|:---------:|:---:|-------------|
-| tidyverse | x | x | x | Core data manipulation |
-| pheatmap | x | | x | Heatmap visualization |
-| caret | x | | x | ML utilities (for clustering) |
-| kableExtra | x | x | x | HTML table formatting |
-| emmeans | | | x | Estimated marginal means |
-| car | | | x | Type II ANOVA |
-| broom | | | x | Model tidying |
-| patchwork | | x | x | Plot composition |
-| gridExtra | | | x | Arrange multiple plots |
-| poibin | x | | | Poisson binomial distribution |
-| irlba | x | | | Fast SVD/PCA |
+| Package | Primary_QC | Replicate | U19 | Clustering | Description |
+|---------|:----------:|:---------:|:---:|:----------:|-------------|
+| tidyverse | x | x | x | x | Core data manipulation |
+| pheatmap | x | | x | | Heatmap visualization |
+| caret | x | | x | | ML utilities (for clustering) |
+| kableExtra | x | x | x | x | HTML table formatting |
+| emmeans | | | x | | Estimated marginal means |
+| car | | | x | | Type II ANOVA |
+| broom | | | x | | Model tidying |
+| patchwork | | x | x | | Plot composition |
+| gridExtra | | | x | x | Arrange multiple plots |
+| poibin | x | | | | Poisson binomial distribution |
+| irlba | x | | | | Fast SVD/PCA |
+| FactoMineR | | | | x | PCA analysis |
+| factoextra | | | | x | PCA visualization |
+| scales | | | | x | Plot formatting |
 
 ## Using Shared Functions
 
