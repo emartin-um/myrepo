@@ -4,9 +4,11 @@
 .RData
 .Ruserdata
 
-# Data files - keep input/output out of version control
-**/input_files/
-**/output_files/
+# Data files - keep input/output out of version control (but keep .gitkeep)
+**/input_files/**
+**/output_files/**
+!**/input_files/.gitkeep
+!**/output_files/.gitkeep
 
 # HTML output from Quarto/Rmd (regenerated from source)
 *.html

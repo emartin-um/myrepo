@@ -28,7 +28,7 @@ library(knitr)
 library(kableExtra)
 
 # Read metadata file
-metadata <- read_csv("input_files/U19_Alamar_metadata_2026Jan16.csv")
+metadata <- read_csv("input_files/U19_Alamar_metadata.csv")
 
 # Rename APOE in metadata to APOE.geno and create Group_Race_Ethnicity
 metadata <- metadata %>%
@@ -36,8 +36,8 @@ metadata <- metadata %>%
   mutate(Group_Race_Ethnicity = paste(Group, Race, Ethnicity, sep = "_"))
 
 # Read post-QC biomarker files
-biomarkers_postQC <- read_csv("input_files/NPQ_20251220_post_QC.csv")
-biomarkers_low_postQC <- read_csv("input_files/NPQ_20251220_Low_post_QC.csv")
+biomarkers_postQC <- read_csv("input_files/NPQ_post_QC.csv")
+biomarkers_low_postQC <- read_csv("input_files/NPQ_Low_post_QC.csv")
 
 # Clean up biomarker column names - remove hyphens and special characters
 biomarkers_postQC <- biomarkers_postQC %>%

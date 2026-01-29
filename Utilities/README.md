@@ -19,11 +19,18 @@ Merges post-QC NPQ biomarker files with metadata. Generates:
 - Sample exclusion report identifying duplicates and implausible values
 - Metadata quality control summaries
 
+**Required Input Files** (place in `Utilities/input_files/`):
+- `NPQ_post_QC.csv` - Standard post-QC biomarker data
+- `NPQ_Low_post_QC.csv` - Low post-QC biomarker data
+- `U19_Alamar_metadata.csv` - Sample metadata
+
 ### Apply_Filters.qmd
 Applies exclusion filters from File_Merge.qmd to the merged datasets:
 - Removes flagged samples (duplicates, implausible values)
 - Outputs filtered datasets ready for analysis
 - Provides before/after filtering summaries
+
+**Input:** Uses output from File_Merge.qmd in `Utilities/output_files/`
 
 ## Function Reference (shared_functions.R)
 
@@ -123,13 +130,14 @@ Print a key-value pair in bold markdown format.
 ## Workflow
 
 For File_Merge and Apply_Filters, run in sequence:
-1. Run `File_Merge.qmd` first to merge files and generate exclusion report
-2. Run `Apply_Filters.qmd` to apply filters and create final datasets
+1. Place input files in `Utilities/input_files/`
+2. Run `File_Merge.qmd` first to merge files and generate exclusion report
+3. Run `Apply_Filters.qmd` to apply filters and create final datasets
 
 ## Input/Output
 
-Scripts expect:
-- `input_files/` - Source data files
+Scripts use directories within the Utilities folder:
+- `input_files/` - Source data files (NPQ post-QC data, metadata)
 - `output_files/` - Merged and filtered outputs
 
 ## Dependencies
