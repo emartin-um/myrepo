@@ -1,0 +1,610 @@
+---
+title: "Hemolysis Analysis by Site"
+author: "ERM"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    code_folding: hide
+---
+
+# Overview
+
+This is an analysis designed to examine five biomarkers that may be indicators of hemolysis in the samples prior to running the assay.
+
+- HBA1 (Hemoglobin Subunit Alpha 1): The primary component of RBCs. Its presence in plasma is the direct gold-standard indicator of hemolysis.
+- PGK1 (Phosphoglycerate Kinase 1): A glycolytic enzyme. Deficiency in this enzyme causes hereditary hemolytic anemia, emphasizing its critical role within RBCs.
+- MDH1 (Malate Dehydrogenase 1): An enzyme involved in the citric acid cycle. It is often released during cell damage, particularly from RBCs.
+- SOD1 (Superoxide Dismutase 1): An antioxidant enzyme highly abundant in the RBC cytoplasm.
+- ENO2 (Enolase 2 / Neuron-Specific Enolase): While also found in neurons, it is present in RBCs and is frequently used as a marker for hemolysis interference in clinical labs.
+
+# Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(broom)
+library(car)
+library(corrplot)
+library(knitr)
+library(kableExtra)
+
+# Load data - check input_files first, then fall back to Metadata_Merge output
+input_file <- "input_files/filtered_combined_post_QC.csv"
+fallback_file <- "../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv"
+
+if (file.exists(input_file)) {
+  df <- read_csv(input_file, show_col_types = FALSE)
+  cat("Loaded data from:", input_file, "\n")
+} else if (file.exists(fallback_file)) {
+  df <- read_csv(fallback_file, show_col_types = FALSE)
+  cat("Loaded data from fallback:", fallback_file, "\n")
+} else {
+  stop("Could not find filtered_combined_post_QC.csv in input_files/ or Metadata_Merge/output_files/filtered/")
+}
+
+# Hemolysis markers - intracellular proteins that indicate RBC lysis
+hemolysis_markers <- c("PGK1", "MDH1", "SOD1", "ENO2", "HBA1")
+
+# Check which are available
+hemolysis_available <- intersect(hemolysis_markers, names(df))
+cat("Available hemolysis markers:", paste(hemolysis_available, collapse=", "), "\n")
+
+# Define metadata columns (non-biomarker columns)
+metadata_cols <- c("RUN", "SAMPLE_ALIQUOT", "SAMPLE", "Record_ID", "newsample",
+                   "Group", "Ethnicity", "Race", "sex", "age_at_subject",
+                   "CDX", "Case_Control", "AOO", "Years_Onset", "APOE.geno",
+                   "height_inches", "weight_lb", "BMI", "Site", "Country/State",
+                   "country_of_birth", "Group_Race_Ethnicity", "___1", "Run", "Bay")
+
+# Get all biomarker columns (everything not in metadata)
+biomarker_cols <- setdiff(names(df), metadata_cols)
+cat("\nTotal biomarkers:", length(biomarker_cols), "\n")
+
+# Helper function
+protect_name <- function(name) {
+  if (grepl("[^a-zA-Z0-9_.]", name)) {
+    return(paste0("`", name, "`"))
+  }
+  return(name)
+}
+```
+
+# 1. Create Hemolysis Index
+
+We use the mean of available hemolysis markers.
+
+```{r hemolysis-index, results='asis'}
+# Create composite hemolysis index (mean of available markers)
+df_hemo <- df %>%
+  mutate(
+    Hemolysis_Index = rowMeans(select(., all_of(hemolysis_available)), na.rm = TRUE),
+    Site = factor(Site)
+  ) %>%
+  filter(!is.na(Hemolysis_Index))
+
+# Save output with metadata + hemolysis markers + index
+df_hemo %>%
+  as_tibble() %>%
+  select(all_of(intersect(metadata_cols, names(.))),
+         all_of(hemolysis_available),
+         Hemolysis_Index) %>%
+  write_csv("output_files/hemo_data_output.csv")
+
+cat("Sample size with hemolysis data:", nrow(df_hemo), "\n\n")
+# Sample sizes by Site
+cat("Sample sizes by Site:\n\n")
+site_counts <- df_hemo %>% count(Site, sort = TRUE)
+kable(site_counts)
+
+# Collapse Sites with small sample sizes
+min_site_n <- 5  # default threshold
+
+df_hemo <- df_hemo %>%
+  add_count(Site, name = "site_n") %>%
+  mutate(
+    Site = if_else(site_n <= min_site_n, "Other", as.character(Site)),
+    Site = factor(Site)
+  ) %>%
+  select(-site_n)
+site_counts <- df_hemo %>% count(Site, sort = TRUE)
+
+```
+
+# 2. Test Hemolysis by Site
+
+## 2.1 Overall ANOVA
+
+```{r hemolysis-by-site-anova, results='asis'}
+# Test if hemolysis index differs by Site
+lm_hemo <- lm(Hemolysis_Index ~ Site, data = df_hemo)
+anova_hemo <- Anova(lm_hemo, type = "II")
+
+cat("ANOVA: Hemolysis_Index ~ Site\n\n")
+kable(tidy(anova_hemo), digits = 4)
+
+if (anova_hemo$`Pr(>F)`[1] < 0.05) {
+  cat("\n**Significant Site effect (p < 0.05)**\n")
+  cat("Hemolysis varies across Sites - pre-analytical differences likely\n\n")
+} else {
+  cat("\n**No significant Site effect**\n")
+  cat("Hemolysis appears consistent across Sites\n\n")
+}
+```
+
+## 2.2 Mean Hemolysis by Site
+
+```{r hemolysis-means, results='asis'}
+hemo_by_site <- df_hemo %>%
+  group_by(Site) %>%
+  summarise(
+    N = n(),
+    Mean_Hemolysis = mean(Hemolysis_Index, na.rm = TRUE),
+    SD = sd(Hemolysis_Index, na.rm = TRUE),
+    Median = median(Hemolysis_Index, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Mean_Hemolysis))
+
+cat("Hemolysis Index by Site (sorted high to low):\n\n")
+kable(hemo_by_site, digits = 3)
+```
+
+## 2.3 Visualization
+
+```{r hemolysis-plot, fig.width=10, fig.height=6}
+ggplot(df_hemo, aes(x = reorder(Site, Hemolysis_Index, median), 
+                    y = Hemolysis_Index, fill = Site)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.2, size = 0.8) +
+  coord_flip() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(title = "Hemolysis Index by Site",
+       subtitle = "Sites ordered by median hemolysis level",
+       x = "Site", y = "Hemolysis Index (mean of 5 markers)")
+```
+
+# 3. Individual Hemolysis Markers by Site
+
+```{r individual-markers, results='asis'}
+# Test each hemolysis marker separately
+marker_results <- map_df(hemolysis_available, function(marker) {
+  
+  formula_str <- paste(protect_name(marker), "~ Site")
+  model_data <- df_hemo %>% 
+    select(Site, all_of(marker)) %>% 
+    drop_na()
+  
+  lm_fit <- lm(as.formula(formula_str), data = model_data)
+  anova_result <- Anova(lm_fit, type = "II")
+  
+  # Get highest and lowest sites
+  site_means <- model_data %>%
+    group_by(Site) %>%
+    summarise(Mean = mean(.data[[marker]]), .groups = "drop") %>%
+    arrange(desc(Mean))
+  
+  tibble(
+    Marker = marker,
+    F_stat = anova_result$`F value`[1],
+    p_value = anova_result$`Pr(>F)`[1],
+    Highest_Site = site_means$Site[1],
+    Lowest_Site = site_means$Site[nrow(site_means)],
+    Fold_Difference = site_means$Mean[1] / site_means$Mean[nrow(site_means)]
+  )
+})
+
+cat("Individual hemolysis markers by Site:\n\n")
+marker_results %>%
+  arrange(p_value) %>%
+  kbl(digits = 3, format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+cat("\n\n**Interpretation:**\n")
+cat("- p < 0.05: Marker varies significantly by Site\n")
+cat("- Fold_Difference: How much higher the highest Site is vs lowest\n")
+```
+
+## 3.1 Heatmap of Markers by Site
+
+```{r heatmap-markers, fig.width=10, fig.height=8}
+# Create matrix of mean marker levels by Site
+hemo_matrix <- df_hemo %>%
+  select(Site, all_of(hemolysis_available)) %>%
+  pivot_longer(cols = all_of(hemolysis_available), 
+               names_to = "Marker", 
+               values_to = "Value") %>%
+  group_by(Site, Marker) %>%
+  summarise(Mean = mean(Value, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Site, values_from = Mean) %>%
+  column_to_rownames("Marker") %>%
+  as.matrix()
+
+# Z-score normalize for visualization
+hemo_matrix_z <- t(scale(t(hemo_matrix)))
+
+# Heatmap
+library(pheatmap)
+pheatmap(hemo_matrix_z,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         main = "Hemolysis Markers by Site (Z-scored)",
+         fontsize = 8,
+         cellwidth = 20,
+         cellheight = 20)
+```
+
+# 4. Hemolysis Correlations by Site
+
+```{r correlations-by-site, results='asis'}
+cat("Test if hemolysis markers correlate within each Site\n")
+cat("High correlations = coordinated hemolysis (sample handling issue)\n")
+cat("Low correlations = independent variation\n\n")
+
+# Get sites with sufficient sample size
+sites_with_data <- site_counts %>% 
+  filter(n >= 20) %>% 
+  pull(Site)
+
+cor_summary <- map_df(sites_with_data, function(site) {
+  
+  site_data <- df_hemo %>%
+    filter(Site == site) %>%
+    select(all_of(hemolysis_available)) %>%
+    drop_na()
+  
+  if (nrow(site_data) >= 20) {
+    cor_mat <- cor(site_data)
+    upper_tri <- cor_mat[upper.tri(cor_mat)]
+    
+    tibble(
+      Site = site,
+      N = nrow(site_data),
+      Mean_r = mean(upper_tri),
+      Min_r = min(upper_tri),
+      Max_r = max(upper_tri),
+      SD_r = sd(upper_tri)
+    )
+  } else {
+    tibble(
+      Site = site,
+      N = nrow(site_data),
+      Mean_r = NA_real_,
+      Min_r = NA_real_,
+      Max_r = NA_real_,
+      SD_r = NA_real_
+    )
+  }
+})
+
+cat("Hemolysis marker inter-correlations by Site:\n\n")
+cor_summary %>%
+  arrange(desc(Mean_r)) %>%
+  kbl(digits = 3, format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+cat("\n\n**Interpretation:**\n")
+cat("- Mean_r > 0.5: Strong coordinated hemolysis at that Site\n")
+cat("- Mean_r < 0.3: Markers vary independently\n")
+cat("- High SD_r: Inconsistent marker relationships\n")
+```
+
+# 5. Do Site Differences Reflect Hemolysis?
+
+```{r site-hemolysis-confounding, results='asis'}
+cat("Test if biomarkers with Site differences are confounded by hemolysis\n\n")
+
+# First find biomarkers that differ by Site
+biomarkers_with_site_effect <- map_df(biomarker_cols, function(biom) {
+  
+  formula_str <- paste(protect_name(biom), "~ Site")
+  model_data <- df_hemo %>% 
+    select(Site, all_of(biom)) %>% 
+    drop_na()
+  
+  if (nrow(model_data) > 50) {
+    lm_fit <- lm(as.formula(formula_str), data = model_data)
+    anova_result <- Anova(lm_fit, type = "II")
+    
+    tibble(
+      Biomarker = biom,
+      F_Site = anova_result$`F value`[1],
+      p_Site = anova_result$`Pr(>F)`[1]
+    )
+  } else {
+    tibble(
+      Biomarker = biom,
+      F_Site = NA_real_,
+      p_Site = NA_real_
+    )
+  }
+}) %>%
+  mutate(FDR_Site = p.adjust(p_Site, method = "fdr")) %>%
+  filter(FDR_Site < 0.05) %>%
+  arrange(p_Site)
+
+cat("Biomarkers with significant Site effect (FDR < 0.05):", nrow(biomarkers_with_site_effect), "\n\n")
+
+if (nrow(biomarkers_with_site_effect) > 0) {
+  cat("Top 10:\n\n")
+  kable(head(biomarkers_with_site_effect, 10), digits = 4)
+  
+  # Test if controlling for hemolysis reduces Site effect
+  cat("\n\n## 5.1 Control for Hemolysis\n\n")
+  
+  hemolysis_control <- map_df(head(biomarkers_with_site_effect$Biomarker, 20), function(biom) {
+    
+    # Model without hemolysis
+    formula1 <- as.formula(paste(protect_name(biom), "~ Site"))
+    
+    # Model with hemolysis
+    formula2 <- as.formula(paste(protect_name(biom), "~ Site + Hemolysis_Index"))
+    
+    model_data <- df_hemo %>%
+      select(Site, Hemolysis_Index, all_of(biom)) %>%
+      drop_na()
+    
+    lm1 <- lm(formula1, data = model_data)
+    lm2 <- lm(formula2, data = model_data)
+    
+    anova1 <- Anova(lm1, type = "II")
+    anova2 <- Anova(lm2, type = "II")
+    
+    tibble(
+      Biomarker = biom,
+      F_Site_unadj = anova1$`F value`[1],
+      p_Site_unadj = anova1$`Pr(>F)`[1],
+      F_Site_adj = anova2$`F value`[1],
+      p_Site_adj = anova2$`Pr(>F)`[1],
+      F_Hemolysis = anova2$`F value`[2],
+      p_Hemolysis = anova2$`Pr(>F)`[2],
+      Pct_F_Reduction = 100 * (1 - anova2$`F value`[1] / anova1$`F value`[1])
+    )
+  })
+  
+  cat("Effect of controlling for hemolysis on Site differences:\n\n")
+  hemolysis_control %>%
+    arrange(desc(Pct_F_Reduction)) %>%
+    kbl(digits = 3, format = "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+  
+  cat("\n\n**Interpretation:**\n")
+  cat("- Pct_F_Reduction > 50%: Site difference largely explained by hemolysis (artifact)\n")
+  cat("- Pct_F_Reduction < 25%: Site difference persists (likely biological)\n")
+  cat("- p_Hemolysis < 0.05: Biomarker associated with hemolysis\n\n")
+  
+  # Flag likely artifacts
+  likely_artifacts <- hemolysis_control %>%
+    filter(Pct_F_Reduction > 50, p_Site_unadj < 0.05)
+  
+  if (nrow(likely_artifacts) > 0) {
+    cat("\n**Biomarkers likely affected by hemolysis artifact:**\n\n")
+    kable(likely_artifacts %>% select(Biomarker, Pct_F_Reduction, p_Hemolysis))
+  }
+  
+} else {
+  cat("No biomarkers show significant Site differences\n")
+}
+```
+
+# 6. Site × Hemolysis Interactions
+
+```{r site-hemolysis-interaction, results='asis'}
+cat("Test if hemolysis effects vary by Site\n")
+cat("Significant interaction = hemolysis confounding differs across Sites\n\n")
+
+# Test for top biomarkers with Site effect
+if (exists("biomarkers_with_site_effect") &&
+    nrow(biomarkers_with_site_effect) > 0) {
+
+  # Required for Type III ANOVA
+  options(contrasts = c("contr.sum", "contr.poly"))
+
+  ## -----------------------------
+  ## Interaction models
+  ## -----------------------------
+  interaction_results <- map_df(
+    head(biomarkers_with_site_effect$Biomarker, 15),
+    function(biom) {
+
+      model_data <- df_hemo %>%
+        select(Site, Hemolysis_Index, all_of(biom)) %>%
+        drop_na() %>%
+        mutate(Site = droplevels(factor(Site)))
+
+      # Must have >1 Site and variation in Hemolysis
+      if (nlevels(model_data$Site) < 2 ||
+          sd(model_data$Hemolysis_Index) == 0) {
+        return(NULL)
+      }
+
+      formula_int <- as.formula(
+        paste(protect_name(biom), "~ Site * Hemolysis_Index")
+      )
+
+      lm_int <- try(lm(formula_int, data = model_data), silent = TRUE)
+      if (inherits(lm_int, "try-error")) return(NULL)
+
+      # Skip aliased models
+      if (any(is.na(coef(lm_int)))) return(NULL)
+
+      anova_int <- try(Anova(lm_int, type = "III"), silent = TRUE)
+      if (inherits(anova_int, "try-error")) return(NULL)
+
+      tibble(
+        Biomarker = biom,
+        F_Site = anova_int["Site", "F value"],
+        p_Site = anova_int["Site", "Pr(>F)"],
+        F_Hemolysis = anova_int["Hemolysis_Index", "F value"],
+        p_Hemolysis = anova_int["Hemolysis_Index", "Pr(>F)"],
+        F_Interaction = anova_int["Site:Hemolysis_Index", "F value"],
+        p_Interaction = anova_int["Site:Hemolysis_Index", "Pr(>F)"]
+      )
+    }
+  )
+
+  ## -----------------------------
+  ## Diagnostics (always computed)
+  ## -----------------------------
+  interaction_diagnostic <- map_df(
+    head(biomarkers_with_site_effect$Biomarker, 15),
+    function(biom) {
+
+      model_data <- df_hemo %>%
+        select(Site, Hemolysis_Index, all_of(biom)) %>%
+        drop_na() %>%
+        mutate(Site = droplevels(factor(Site)))
+
+      tibble(
+        Biomarker = biom,
+        n_samples = nrow(model_data),
+        n_sites = nlevels(model_data$Site),
+        hemo_sd = if (nrow(model_data) > 1)
+  sd(model_data$Hemolysis_Index)
+else
+  NA_real_
+      )
+    }
+  )
+
+  ## -----------------------------
+  ## Output
+  ## -----------------------------
+  cat("Site × Hemolysis interactions:\n\n")
+
+  if (nrow(interaction_results) > 0) {
+
+    interaction_results %>%
+      arrange(p_Interaction) %>%
+      kbl(digits = 4, format = "html") %>%
+      kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed")
+      )
+
+    sig_int <- interaction_results %>%
+      filter(p_Interaction < 0.05)
+
+    if (nrow(sig_int) > 0) {
+      cat("\n\n**Biomarkers with significant Site × Hemolysis interaction:**\n")
+      cat("Hemolysis affects these biomarkers differently across Sites\n\n")
+      kable(sig_int %>% select(Biomarker, F_Interaction, p_Interaction))
+    }
+
+  } } else {
+
+  cat("No estimable Site × Hemolysis interactions for the selected biomarkers.\n\n")
+
+  if (nrow(interaction_diagnostic) > 0) {
+
+    cat("Diagnostics:\n")
+
+    knitr::kable(
+      interaction_diagnostic,
+      digits = 3,
+      caption = "Why Site × Hemolysis interactions were not estimable"
+    )
+
+  } else {
+
+    cat("No diagnostic data available (all biomarkers filtered during preprocessing).\n")
+  }
+}
+```
+
+# 7. Summary
+
+```{r summary, results='asis'}
+cat("## KEY FINDINGS\n\n")
+
+anova_hemo_safe       <- get0("anova_hemo", ifnotfound = NULL)
+marker_results_safe   <- get0("marker_results", ifnotfound = NULL)
+likely_artifacts_safe <- get0("likely_artifacts", ifnotfound = NULL)
+sig_int_safe          <- get0("sig_int", ifnotfound = NULL)
+
+## 1. Hemolysis by Site
+cat("1. HEMOLYSIS BY SITE:\n")
+if (is.data.frame(anova_hemo_safe) &&
+    nrow(anova_hemo_safe) > 0 &&
+    "Pr(>F)" %in% colnames(anova_hemo_safe) &&
+    !is.na(anova_hemo_safe$`Pr(>F)`[1]) &&
+    anova_hemo_safe$`Pr(>F)`[1] < 0.05) {
+
+  cat("   ✓ Hemolysis varies significantly by Site (p < 0.05)\n")
+  cat("   → Pre-analytical differences exist across Sites\n")
+
+} else {
+
+  cat("   ○ Hemolysis similar across Sites\n")
+  cat("   → Sample handling appears consistent\n")
+}
+
+## 2. Individual markers
+cat("\n2. INDIVIDUAL MARKERS:\n")
+if (is.data.frame(marker_results_safe) &&
+    "p_value" %in% colnames(marker_results_safe) &&
+    nrow(marker_results_safe) > 0) {
+
+  sig_markers <- sum(marker_results_safe$p_value < 0.05, na.rm = TRUE)
+  cat("   ", sig_markers, "/", nrow(marker_results_safe),
+      "markers vary significantly by Site\n")
+
+} else {
+
+  cat("   ○ Marker-level Site tests not available\n")
+}
+
+## 3. Biomarker confounding
+cat("\n3. BIOMARKER CONFOUNDING:\n")
+if (is.data.frame(likely_artifacts_safe) &&
+    nrow(likely_artifacts_safe) > 0) {
+
+  cat("   ⚠ ", nrow(likely_artifacts_safe),
+      "biomarkers show >50% F-reduction\n")
+  cat("   → Site differences likely technical artifacts\n")
+
+} else {
+
+  cat("   ✓ Site differences appear biological (not hemolysis)\n")
+}
+
+## 4. Site × Hemolysis interactions
+cat("\n4. SITE-SPECIFIC HEMOLYSIS EFFECTS:\n")
+if (is.data.frame(sig_int_safe) &&
+    nrow(sig_int_safe) > 0) {
+
+  cat("   ⚠ ", nrow(sig_int_safe),
+      "biomarkers show Site × Hemolysis interaction\n")
+  cat("   → Hemolysis confounding differs across Sites\n")
+
+} else {
+
+  cat("   ✓ Hemolysis effects consistent across Sites\n")
+}
+
+cat("\n\nRECOMMENDATIONS:\n")
+cat("- Flag samples with high hemolysis (e.g., Hemolysis_Index > mean + 2 SD)\n")
+cat("- Consider sensitivity analyses excluding high-hemolysis samples\n")
+cat("- For Site comparisons, adjust for hemolysis when appropriate\n")
+cat("- Investigate sample handling at Sites with elevated hemolysis\n")
+
+```
+
+# Analysis Notes
+
+```{r notes, results='asis'}
+notes_file <- "notes.md"
+if (file.exists(notes_file)) {
+  notes_content <- readLines(notes_file, warn = FALSE)
+  cat(paste(notes_content, collapse = "\n"))
+} else {
+  cat("*No notes.md file found.*\n")
+}
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
