@@ -32,6 +32,30 @@ Applies exclusion filters from File_Merge.qmd to the merged datasets:
 
 **Input:** Uses output from File_Merge.qmd in `Utilities/output_files/`
 
+### run_data_merge_pipeline.R
+**Automated pipeline script** that runs the full data merge workflow:
+1. Copies post-QC files from `Primary_QC/output_files/` to `Utilities/input_files/`
+2. Runs `File_Merge.qmd` to merge biomarker data with metadata
+3. Runs `Apply_Filters.qmd` to apply exclusion filters
+
+**Usage:**
+```bash
+cd Utilities/
+Rscript run_data_merge_pipeline.R
+```
+
+**Configuration:**
+- `NPQ_DATE_PATTERN`: Set to specific date (e.g., "20251220") or `NULL` for auto-detect
+- Auto-detect finds the most recent NPQ files by modification time
+
+**Prerequisites:**
+- Primary_QC pipeline must have been run first
+- `U19_Alamar_metadata.csv` must be in `Utilities/input_files/`
+
+**Output:**
+- Prints summary of exclusion reasons and counts
+- Final filtered datasets in `output_files/filtered/`
+
 ## Function Reference (shared_functions.R)
 
 ### Data Summarization
@@ -129,10 +153,19 @@ Print a key-value pair in bold markdown format.
 
 ## Workflow
 
+### Automated (Recommended)
+Run the pipeline script after Primary_QC is complete:
+```bash
+cd Utilities/
+Rscript run_data_merge_pipeline.R
+```
+
+### Manual
 For File_Merge and Apply_Filters, run in sequence:
-1. Place input files in `Utilities/input_files/`
+1. Copy post-QC files from `Primary_QC/output_files/` to `Utilities/input_files/`
 2. Run `File_Merge.qmd` first to merge files and generate exclusion report
-3. Run `Apply_Filters.qmd` to apply filters and create final datasets
+3. Review `output_files/sample_exclusion_report.csv` if needed
+4. Run `Apply_Filters.qmd` to apply filters and create final datasets
 
 ## Input/Output
 

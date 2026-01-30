@@ -18,7 +18,7 @@ R code for quality control and analysis of Alamar biomarker data for the U19 Alz
 Primary quality control pipeline for biomarker data. Filters samples and biomarkers based on read counts, detectability, and LOD criteria.
 
 **Scripts:**
-- `QC_Pipeline_Primary_ALZ123_12_20_25.Rmd` - Main QC pipeline for ALZ1/2/3 data
+- `QC_Pipeline_Primary_Alamar.Rmd` - Main QC pipeline 
 
 Open `Primary_QC/Primary_QC.Rproj` in RStudio.
 
