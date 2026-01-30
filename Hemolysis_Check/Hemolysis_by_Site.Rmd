@@ -513,7 +513,597 @@ else
 }
 ```
 
-# 7. Summary
+# 7. Sex Differences in Hemolysis by Site
+
+G6PD deficiency (which causes hemolysis) is X-linked and more common in males. It's also more prevalent in certain populations (African, African-American, Mediterranean). If hemolysis differences are biological rather than pre-analytical, we might see sex effects.
+
+```{r sex-differences, results='asis', fig.width=10, fig.height=6}
+# Check if sex variable exists and has data
+if ("sex" %in% names(df_hemo) && sum(!is.na(df_hemo$sex)) > 50) {
+
+  df_sex <- df_hemo %>%
+    filter(!is.na(sex), sex %in% c("M", "F", "Male", "Female", "1", "2")) %>%
+    mutate(Sex = case_when(
+      sex %in% c("M", "Male", "1") ~ "Male",
+      sex %in% c("F", "Female", "2") ~ "Female",
+      TRUE ~ NA_character_
+    )) %>%
+    filter(!is.na(Sex))
+
+  cat("## 7.1 Overall Sex Effect\n\n")
+
+  # Overall sex effect
+  sex_summary <- df_sex %>%
+    group_by(Sex) %>%
+    summarise(
+      N = n(),
+      Mean = mean(Hemolysis_Index, na.rm = TRUE),
+      SD = sd(Hemolysis_Index, na.rm = TRUE),
+      Median = median(Hemolysis_Index, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  kable(sex_summary, digits = 3)
+
+  # T-test
+  if (length(unique(df_sex$Sex)) == 2) {
+    t_result <- t.test(Hemolysis_Index ~ Sex, data = df_sex)
+    cat("\n\n**T-test:** t =", round(t_result$statistic, 3),
+        ", p =", format.pval(t_result$p.value, digits = 3), "\n")
+
+    if (t_result$p.value < 0.05) {
+      cat("→ Significant sex difference in hemolysis (potential G6PD effect)\n\n")
+    } else {
+      cat("→ No significant sex difference overall\n\n")
+    }
+  }
+
+  cat("\n\n## 7.2 Sex × Site Interaction\n\n")
+  cat("Testing if sex effects on hemolysis vary by Site:\n\n")
+
+  # Sex by Site interaction
+  sites_for_sex <- df_sex %>%
+    count(Site, Sex) %>%
+    pivot_wider(names_from = Sex, values_from = n, values_fill = 0) %>%
+    filter(Male >= 5, Female >= 5) %>%
+    pull(Site)
+
+  if (length(sites_for_sex) >= 2) {
+    df_sex_site <- df_sex %>%
+      filter(Site %in% sites_for_sex) %>%
+      mutate(Site = droplevels(factor(Site)))
+
+    lm_sex_site <- lm(Hemolysis_Index ~ Site * Sex, data = df_sex_site)
+    anova_sex_site <- Anova(lm_sex_site, type = "II")
+
+    print(kable(tidy(anova_sex_site), digits = 4))
+
+    cat("\n\n**Interpretation:**\n")
+    cat("- Site:Sex interaction p < 0.05: Sex effect differs across Sites\n")
+    cat("- This could indicate Site-specific population differences in G6PD\n\n")
+
+    # Visualization
+    print(ggplot(df_sex_site, aes(x = reorder(Site, Hemolysis_Index, median),
+                            y = Hemolysis_Index, fill = Sex)) +
+      geom_boxplot(alpha = 0.7, position = position_dodge(0.8)) +
+      coord_flip() +
+      theme_minimal() +
+      scale_fill_manual(values = c("Female" = "#E69F00", "Male" = "#56B4E9")) +
+      labs(title = "Hemolysis Index by Site and Sex",
+           subtitle = "Testing for sex differences (potential G6PD effect)",
+           x = "Site", y = "Hemolysis Index"))
+
+  } else {
+    cat("Insufficient data for Sex × Site analysis (need ≥5 M and F per Site)\n")
+  }
+
+  cat("\n## 7.3 Sex Differences Within Each Site\n\n")
+
+  sex_by_site <- map_df(sites_for_sex, function(s) {
+    site_data <- df_sex %>% filter(Site == s)
+    if (length(unique(site_data$Sex)) == 2 &&
+        sum(site_data$Sex == "Male") >= 5 &&
+        sum(site_data$Sex == "Female") >= 5) {
+      t_res <- t.test(Hemolysis_Index ~ Sex, data = site_data)
+      means <- site_data %>%
+        group_by(Sex) %>%
+        summarise(Mean = mean(Hemolysis_Index, na.rm = TRUE), .groups = "drop")
+      tibble(
+        Site = s,
+        N_Male = sum(site_data$Sex == "Male"),
+        N_Female = sum(site_data$Sex == "Female"),
+        Mean_Male = means$Mean[means$Sex == "Male"],
+        Mean_Female = means$Mean[means$Sex == "Female"],
+        Diff = Mean_Male - Mean_Female,
+        p_value = t_res$p.value
+      )
+    } else {
+      NULL
+    }
+  })
+
+  if (nrow(sex_by_site) > 0) {
+    print(sex_by_site %>%
+      mutate(FDR = p.adjust(p_value, method = "fdr")) %>%
+      arrange(p_value) %>%
+      kbl(digits = 3, format = "html") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+
+    cat("\n\n**Interpretation:**\n")
+    cat("- Positive Diff: Males have higher hemolysis (consistent with G6PD)\n")
+    cat("- Sites with significant sex differences may have biological hemolysis\n")
+  }
+
+} else {
+  cat("Sex variable not available or insufficient data\n")
+}
+```
+
+# 8. Covariate Associations with Hemolysis
+
+Testing if demographic/clinical covariates correlate with hemolysis within Sites. Associations that persist across Sites may indicate biological rather than pre-analytical effects.
+
+```{r covariate-associations, results='asis', fig.width=12, fig.height=10}
+# Define covariates to test
+covariates <- c("RUN", "Race", "sex", "age_at_subject", "CDX", "AOO", "BMI")
+covariates_available <- intersect(covariates, names(df_hemo))
+
+cat("Available covariates:", paste(covariates_available, collapse = ", "), "\n\n")
+
+if (length(covariates_available) > 0) {
+
+  cat("## 8.1 Overall Covariate Associations\n\n")
+
+  covar_results <- map_df(covariates_available, function(covar) {
+
+    test_data <- df_hemo %>%
+      select(Hemolysis_Index, all_of(covar)) %>%
+      drop_na()
+
+    if (nrow(test_data) < 30) {
+      return(tibble(Covariate = covar, Test = NA, Statistic = NA, p_value = NA, Note = "Insufficient data"))
+    }
+
+    covar_vals <- test_data[[covar]]
+
+    # Determine if numeric or categorical
+    if (is.numeric(covar_vals) && length(unique(covar_vals)) > 10) {
+      # Correlation for continuous
+      cor_res <- cor.test(test_data$Hemolysis_Index, covar_vals, method = "pearson")
+      tibble(
+        Covariate = covar,
+        Test = "Pearson r",
+        Statistic = cor_res$estimate,
+        p_value = cor_res$p.value,
+        Note = paste("N =", nrow(test_data))
+      )
+    } else {
+      # ANOVA for categorical
+      test_data$covar_factor <- factor(covar_vals)
+      if (nlevels(test_data$covar_factor) < 2) {
+        return(tibble(Covariate = covar, Test = NA, Statistic = NA, p_value = NA, Note = "Only 1 level"))
+      }
+      lm_fit <- lm(Hemolysis_Index ~ covar_factor, data = test_data)
+      anova_res <- Anova(lm_fit, type = "II")
+      tibble(
+        Covariate = covar,
+        Test = "ANOVA F",
+        Statistic = anova_res$`F value`[1],
+        p_value = anova_res$`Pr(>F)`[1],
+        Note = paste("N =", nrow(test_data), ", levels =", nlevels(test_data$covar_factor))
+      )
+    }
+  })
+
+  print(covar_results %>%
+    arrange(p_value) %>%
+    kbl(digits = 4, format = "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+
+  cat("\n\n## 8.2 Covariate Associations Within Sites\n\n")
+  cat("Testing covariates within each Site to identify consistent patterns:\n\n")
+
+  # Focus on numeric covariates for within-site correlations
+  numeric_covars <- covariates_available[sapply(df_hemo[covariates_available], function(x) {
+    is.numeric(x) && length(unique(na.omit(x))) > 5
+  })]
+
+  if (length(numeric_covars) > 0) {
+
+    within_site_cors <- map_df(sites_with_data, function(s) {
+      site_data <- df_hemo %>% filter(Site == s)
+
+      map_df(numeric_covars, function(covar) {
+        test_data <- site_data %>%
+          select(Hemolysis_Index, all_of(covar)) %>%
+          drop_na()
+
+        if (nrow(test_data) >= 20) {
+          cor_res <- cor.test(test_data$Hemolysis_Index, test_data[[covar]], method = "pearson")
+          tibble(
+            Site = s,
+            Covariate = covar,
+            N = nrow(test_data),
+            r = cor_res$estimate,
+            p_value = cor_res$p.value
+          )
+        } else {
+          NULL
+        }
+      })
+    })
+
+    if (nrow(within_site_cors) > 0) {
+      # Summarize across Sites
+      covar_consistency <- within_site_cors %>%
+        group_by(Covariate) %>%
+        summarise(
+          N_Sites = n(),
+          Mean_r = mean(r, na.rm = TRUE),
+          SD_r = sd(r, na.rm = TRUE),
+          N_Significant = sum(p_value < 0.05, na.rm = TRUE),
+          Consistent_Direction = sum(r > 0) == n() | sum(r < 0) == n(),
+          .groups = "drop"
+        ) %>%
+        arrange(desc(abs(Mean_r)))
+
+      cat("**Summary of within-Site correlations:**\n\n")
+      print(kable(covar_consistency, digits = 3))
+
+      cat("\n\n**Interpretation:**\n")
+      cat("- Consistent_Direction = TRUE: Effect is in same direction across all Sites (likely biological)\n")
+      cat("- High N_Significant: Covariate reliably associated with hemolysis\n\n")
+
+      # Detailed table
+      cat("\n**Detailed within-Site correlations:**\n\n")
+      print(within_site_cors %>%
+        arrange(Covariate, Site) %>%
+        kbl(digits = 3, format = "html") %>%
+        kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+    }
+  }
+
+  cat("\n\n## 8.3 Visualization of Key Covariates\n\n")
+
+  # Plot age and BMI if available
+  plot_list <- list()
+
+  if ("age_at_subject" %in% names(df_hemo)) {
+    p_age <- ggplot(df_hemo %>% filter(!is.na(age_at_subject)),
+                    aes(x = age_at_subject, y = Hemolysis_Index)) +
+      geom_point(alpha = 0.3) +
+      geom_smooth(method = "lm", color = "red") +
+      facet_wrap(~Site, scales = "free") +
+      theme_minimal() +
+      labs(title = "Hemolysis vs Age by Site", x = "Age", y = "Hemolysis Index")
+    plot_list$age <- p_age
+  }
+
+  if ("BMI" %in% names(df_hemo)) {
+    p_bmi <- ggplot(df_hemo %>% filter(!is.na(BMI), BMI > 10, BMI < 60),
+                    aes(x = BMI, y = Hemolysis_Index)) +
+      geom_point(alpha = 0.3) +
+      geom_smooth(method = "lm", color = "blue") +
+      facet_wrap(~Site, scales = "free") +
+      theme_minimal() +
+      labs(title = "Hemolysis vs BMI by Site", x = "BMI", y = "Hemolysis Index")
+    plot_list$bmi <- p_bmi
+  }
+
+  if (length(plot_list) > 0) {
+    for (p in plot_list) print(p)
+  }
+
+} else {
+  cat("No covariates available for analysis\n")
+}
+```
+
+# 9. Outlier Detection
+
+Flag samples with unusually high hemolysis, both overall and within each Site.
+
+```{r outlier-detection, results='asis', fig.width=10, fig.height=6}
+cat("## 9.1 Overall Outliers\n\n")
+
+# Calculate overall thresholds
+overall_mean <- mean(df_hemo$Hemolysis_Index, na.rm = TRUE)
+overall_sd <- sd(df_hemo$Hemolysis_Index, na.rm = TRUE)
+overall_median <- median(df_hemo$Hemolysis_Index, na.rm = TRUE)
+overall_iqr <- IQR(df_hemo$Hemolysis_Index, na.rm = TRUE)
+
+# Multiple outlier definitions
+df_hemo <- df_hemo %>%
+  mutate(
+    Outlier_2SD = Hemolysis_Index > (overall_mean + 2 * overall_sd),
+    Outlier_3SD = Hemolysis_Index > (overall_mean + 3 * overall_sd),
+    Outlier_IQR = Hemolysis_Index > (overall_median + 1.5 * overall_iqr)
+  )
+
+outlier_summary <- tibble(
+  Method = c("Mean + 2 SD", "Mean + 3 SD", "Median + 1.5 IQR"),
+  Threshold = c(overall_mean + 2 * overall_sd,
+                overall_mean + 3 * overall_sd,
+                overall_median + 1.5 * overall_iqr),
+  N_Flagged = c(sum(df_hemo$Outlier_2SD),
+                sum(df_hemo$Outlier_3SD),
+                sum(df_hemo$Outlier_IQR)),
+  Pct_Flagged = c(mean(df_hemo$Outlier_2SD) * 100,
+                  mean(df_hemo$Outlier_3SD) * 100,
+                  mean(df_hemo$Outlier_IQR) * 100)
+)
+
+kable(outlier_summary, digits = 3)
+
+cat("\n\n## 9.2 Site-Specific Outliers\n\n")
+cat("Using site-specific Mean + 2 SD threshold:\n\n")
+
+# Calculate site-specific outliers
+df_hemo <- df_hemo %>%
+  group_by(Site) %>%
+  mutate(
+    Site_Mean = mean(Hemolysis_Index, na.rm = TRUE),
+    Site_SD = sd(Hemolysis_Index, na.rm = TRUE),
+    Site_Threshold = Site_Mean + 2 * Site_SD,
+    Outlier_Site_2SD = Hemolysis_Index > Site_Threshold,
+    Z_Score_Site = (Hemolysis_Index - Site_Mean) / Site_SD
+  ) %>%
+  ungroup()
+
+site_outlier_summary <- df_hemo %>%
+  group_by(Site) %>%
+  summarise(
+    N = n(),
+    Mean = mean(Hemolysis_Index, na.rm = TRUE),
+    SD = sd(Hemolysis_Index, na.rm = TRUE),
+    Threshold_2SD = first(Site_Threshold),
+    N_Outliers = sum(Outlier_Site_2SD, na.rm = TRUE),
+    Pct_Outliers = mean(Outlier_Site_2SD, na.rm = TRUE) * 100,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Pct_Outliers))
+
+site_outlier_summary %>%
+  kbl(digits = 3, format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+cat("\n\n## 9.3 Outlier Visualization\n\n")
+
+# Histogram with thresholds
+ggplot(df_hemo, aes(x = Hemolysis_Index)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+  geom_vline(xintercept = overall_mean + 2 * overall_sd, color = "orange", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = overall_mean + 3 * overall_sd, color = "red", linetype = "dashed", linewidth = 1) +
+  theme_minimal() +
+  labs(title = "Distribution of Hemolysis Index with Outlier Thresholds",
+       subtitle = "Orange = Mean + 2 SD, Red = Mean + 3 SD",
+       x = "Hemolysis Index", y = "Count")
+
+cat("\n\n## 9.4 Samples Flagged as Outliers\n\n")
+
+# List outlier samples (using 2 SD threshold)
+outlier_samples <- df_hemo %>%
+  filter(Outlier_2SD) %>%
+  select(any_of(c("SAMPLE", "SAMPLE_ALIQUOT", "Site", "Hemolysis_Index", "Z_Score_Site"))) %>%
+  arrange(desc(Hemolysis_Index))
+
+cat("Samples flagged (Overall 2 SD):", nrow(outlier_samples), "\n\n")
+
+if (nrow(outlier_samples) > 0 && nrow(outlier_samples) <= 50) {
+  outlier_samples %>%
+    kbl(digits = 3, format = "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+} else if (nrow(outlier_samples) > 50) {
+  cat("Showing top 50 outliers:\n\n")
+  head(outlier_samples, 50) %>%
+    kbl(digits = 3, format = "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+}
+
+# Save outlier flags to output
+df_hemo %>%
+  select(any_of(c(intersect(metadata_cols, names(.)),
+                  hemolysis_available,
+                  "Hemolysis_Index", "Outlier_2SD", "Outlier_3SD",
+                  "Outlier_Site_2SD", "Z_Score_Site"))) %>%
+  write_csv("output_files/hemo_data_with_outliers.csv")
+
+cat("\n\nOutlier flags saved to output_files/hemo_data_with_outliers.csv\n")
+```
+
+# 10. Technical Replicate Baseline Variance
+
+Using HIHG technical replicates to establish baseline (technical) variance for hemolysis markers. Variance in real samples that exceeds this baseline and correlates with HBA1 is likely hemolysis-driven rather than technical noise.
+
+```{r replicate-variance, results='asis', fig.width=10, fig.height=8}
+# Load replicate data
+rep_file <- "../Primary_QC/output_files/hihg_reps_NPQ.csv"
+
+if (file.exists(rep_file)) {
+
+  df_reps <- read_csv(rep_file, show_col_types = FALSE)
+  cat("Loaded replicate data:", nrow(df_reps), "samples\n\n")
+
+  # Check which hemolysis markers are in replicate data
+  hemo_in_reps <- intersect(hemolysis_markers, names(df_reps))
+  cat("Hemolysis markers in replicate data:", paste(hemo_in_reps, collapse = ", "), "\n\n")
+
+  if (length(hemo_in_reps) >= 3) {
+
+    cat("## 10.1 Technical Variance (CV) from Replicates\n\n")
+
+    # Calculate CV for each marker across replicates
+    # Assuming replicates are from the same individuals run multiple times
+    rep_stats <- map_df(hemo_in_reps, function(marker) {
+      vals <- df_reps[[marker]]
+      vals <- vals[!is.na(vals) & vals > 0]
+
+      if (length(vals) >= 10) {
+        tibble(
+          Marker = marker,
+          N = length(vals),
+          Mean = mean(vals),
+          SD = sd(vals),
+          CV_pct = (sd(vals) / mean(vals)) * 100,
+          Range = max(vals) - min(vals)
+        )
+      } else {
+        NULL
+      }
+    })
+
+    cat("**Technical variance (CV%) from replicates:**\n\n")
+    print(kable(rep_stats, digits = 3))
+
+    cat("\n\n## 10.2 Compare Sample Variance to Technical Baseline\n\n")
+
+    # Calculate variance in main data
+    sample_stats <- map_df(hemo_in_reps, function(marker) {
+      if (marker %in% names(df_hemo)) {
+        vals <- df_hemo[[marker]]
+        vals <- vals[!is.na(vals) & vals > 0]
+
+        tibble(
+          Marker = marker,
+          Sample_N = length(vals),
+          Sample_Mean = mean(vals),
+          Sample_SD = sd(vals),
+          Sample_CV_pct = (sd(vals) / mean(vals)) * 100
+        )
+      } else {
+        NULL
+      }
+    })
+
+    # Merge and compare
+    if (nrow(sample_stats) > 0 && nrow(rep_stats) > 0) {
+      variance_comparison <- rep_stats %>%
+        select(Marker, Tech_CV = CV_pct) %>%
+        inner_join(
+          sample_stats %>% select(Marker, Sample_CV = Sample_CV_pct),
+          by = "Marker"
+        ) %>%
+        mutate(
+          Excess_CV = Sample_CV - Tech_CV,
+          CV_Ratio = Sample_CV / Tech_CV,
+          Likely_Biological = CV_Ratio > 1.5
+        )
+
+      cat("**Comparison of sample variance to technical baseline:**\n\n")
+      print(variance_comparison %>%
+        kbl(digits = 2, format = "html") %>%
+        kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+
+      cat("\n\n**Interpretation:**\n")
+      cat("- CV_Ratio > 1.5: Sample variance exceeds technical noise (biological variation)\n")
+      cat("- CV_Ratio ~ 1: Variance is mostly technical\n")
+      cat("- Excess_CV: How much additional variance exists beyond technical noise\n\n")
+    }
+
+    cat("\n## 10.3 HBA1 Correlation Analysis\n\n")
+    cat("Biomarkers whose excess variance correlates with HBA1 are likely hemolysis-affected:\n\n")
+
+    # For all biomarkers, correlate with HBA1
+    if ("HBA1" %in% names(df_hemo)) {
+
+      # Get biomarkers that are also in replicate data (so we have tech variance)
+      biomarkers_in_both <- intersect(biomarker_cols, names(df_reps))
+
+      # Calculate correlation with HBA1 for each biomarker
+      hba1_cors <- map_df(biomarkers_in_both, function(biom) {
+        test_data <- df_hemo %>%
+          select(HBA1, all_of(biom)) %>%
+          drop_na()
+
+        if (nrow(test_data) >= 50) {
+          cor_res <- cor.test(test_data$HBA1, test_data[[biom]], method = "pearson")
+
+          # Also get tech CV if available
+          rep_vals <- df_reps[[biom]]
+          rep_vals <- rep_vals[!is.na(rep_vals) & rep_vals > 0]
+          tech_cv <- if (length(rep_vals) >= 10) (sd(rep_vals) / mean(rep_vals)) * 100 else NA
+
+          # Sample CV
+          sample_vals <- test_data[[biom]]
+          sample_cv <- (sd(sample_vals) / mean(sample_vals)) * 100
+
+          tibble(
+            Biomarker = biom,
+            r_HBA1 = cor_res$estimate,
+            p_HBA1 = cor_res$p.value,
+            Tech_CV = tech_cv,
+            Sample_CV = sample_cv,
+            Excess_CV = if (!is.na(tech_cv)) sample_cv - tech_cv else NA
+          )
+        } else {
+          NULL
+        }
+      })
+
+      if (nrow(hba1_cors) > 0) {
+        # Flag likely hemolysis-affected biomarkers
+        hba1_cors <- hba1_cors %>%
+          mutate(
+            FDR = p.adjust(p_HBA1, method = "fdr"),
+            Hemolysis_Affected = abs(r_HBA1) > 0.3 & FDR < 0.05 &
+                                 (is.na(Excess_CV) | Excess_CV > 5)
+          ) %>%
+          arrange(desc(abs(r_HBA1)))
+
+        cat("**Top biomarkers correlated with HBA1:**\n\n")
+        print(head(hba1_cors, 20) %>%
+          kbl(digits = 3, format = "html") %>%
+          kable_styling(bootstrap_options = c("striped", "hover", "condensed")))
+
+        cat("\n\n**Likely hemolysis-affected biomarkers:**\n")
+        cat("(|r| > 0.3, FDR < 0.05, and excess variance > 5%)\n\n")
+
+        affected <- hba1_cors %>% filter(Hemolysis_Affected)
+        if (nrow(affected) > 0) {
+          print(kable(affected %>% select(Biomarker, r_HBA1, FDR, Excess_CV), digits = 3))
+        } else {
+          cat("No biomarkers meet all criteria for hemolysis-affected.\n")
+        }
+
+        # Visualization
+        cat("\n\n## 10.4 Visualization: HBA1 Correlation vs Excess Variance\n\n")
+
+        hba1_cors_plot <- hba1_cors %>% filter(!is.na(Excess_CV))
+
+        if (nrow(hba1_cors_plot) > 10) {
+          print(ggplot(hba1_cors_plot, aes(x = Excess_CV, y = abs(r_HBA1))) +
+            geom_point(aes(color = Hemolysis_Affected), alpha = 0.6) +
+            geom_hline(yintercept = 0.3, linetype = "dashed", color = "red") +
+            geom_vline(xintercept = 5, linetype = "dashed", color = "red") +
+            geom_text(data = hba1_cors_plot %>% filter(Hemolysis_Affected),
+                      aes(label = Biomarker), hjust = -0.1, size = 3) +
+            scale_color_manual(values = c("FALSE" = "gray50", "TRUE" = "red")) +
+            theme_minimal() +
+            labs(title = "Identifying Hemolysis-Affected Biomarkers",
+                 subtitle = "Biomarkers in upper-right quadrant are likely hemolysis-affected",
+                 x = "Excess CV (Sample CV - Technical CV)",
+                 y = "|Correlation with HBA1|",
+                 color = "Likely Affected"))
+        }
+
+        # Save results
+        hba1_cors %>%
+          write_csv("output_files/biomarker_hemolysis_assessment.csv")
+        cat("\n\nResults saved to output_files/biomarker_hemolysis_assessment.csv\n")
+      }
+    }
+
+  } else {
+    cat("Insufficient hemolysis markers in replicate data for analysis\n")
+  }
+
+} else {
+  cat("Replicate data file not found:", rep_file, "\n")
+  cat("Skipping technical variance analysis.\n")
+}
+```
+
+# 11. Summary
 
 ```{r summary, results='asis'}
 cat("## KEY FINDINGS\n\n")
@@ -522,6 +1112,10 @@ anova_hemo_safe       <- get0("anova_hemo", ifnotfound = NULL)
 marker_results_safe   <- get0("marker_results", ifnotfound = NULL)
 likely_artifacts_safe <- get0("likely_artifacts", ifnotfound = NULL)
 sig_int_safe          <- get0("sig_int", ifnotfound = NULL)
+sex_by_site_safe      <- get0("sex_by_site", ifnotfound = NULL)
+covar_results_safe    <- get0("covar_results", ifnotfound = NULL)
+outlier_summary_safe  <- get0("outlier_summary", ifnotfound = NULL)
+hba1_cors_safe        <- get0("hba1_cors", ifnotfound = NULL)
 
 ## 1. Hemolysis by Site
 cat("1. HEMOLYSIS BY SITE:\n")
@@ -583,11 +1177,49 @@ if (is.data.frame(sig_int_safe) &&
   cat("   ✓ Hemolysis effects consistent across Sites\n")
 }
 
+## 5. Sex differences
+cat("\n5. SEX DIFFERENCES (potential G6PD effect):\n")
+if (is.data.frame(sex_by_site_safe) && nrow(sex_by_site_safe) > 0) {
+  sig_sex_sites <- sum(sex_by_site_safe$p_value < 0.05, na.rm = TRUE)
+  if (sig_sex_sites > 0) {
+    cat("   ⚠ ", sig_sex_sites, "Sites show significant sex differences in hemolysis\n")
+    cat("   → May indicate biological hemolysis (G6PD deficiency more common in males)\n")
+  } else {
+    cat("   ○ No significant sex differences detected\n")
+  }
+} else {
+  cat("   ○ Sex analysis not performed\n")
+}
+
+## 6. Outliers
+cat("\n6. OUTLIER SAMPLES:\n")
+if (is.data.frame(outlier_summary_safe) && nrow(outlier_summary_safe) > 0) {
+  n_outliers_2sd <- outlier_summary_safe$N_Flagged[outlier_summary_safe$Method == "Mean + 2 SD"]
+  pct_outliers <- outlier_summary_safe$Pct_Flagged[outlier_summary_safe$Method == "Mean + 2 SD"]
+  cat("   ", n_outliers_2sd, "samples flagged (", round(pct_outliers, 1), "% at 2 SD threshold)\n")
+  cat("   → See output_files/hemo_data_with_outliers.csv\n")
+} else {
+  cat("   ○ Outlier analysis not performed\n")
+}
+
+## 7. Technical vs biological variance
+cat("\n7. TECHNICAL VS BIOLOGICAL VARIANCE:\n")
+if (is.data.frame(hba1_cors_safe) && nrow(hba1_cors_safe) > 0) {
+  n_affected <- sum(hba1_cors_safe$Hemolysis_Affected, na.rm = TRUE)
+  cat("   ", n_affected, "biomarkers likely affected by hemolysis\n")
+  cat("   → (High HBA1 correlation + excess variance beyond technical noise)\n")
+  cat("   → See output_files/biomarker_hemolysis_assessment.csv\n")
+} else {
+  cat("   ○ Technical variance analysis not performed\n")
+}
+
 cat("\n\nRECOMMENDATIONS:\n")
 cat("- Flag samples with high hemolysis (e.g., Hemolysis_Index > mean + 2 SD)\n")
 cat("- Consider sensitivity analyses excluding high-hemolysis samples\n")
 cat("- For Site comparisons, adjust for hemolysis when appropriate\n")
 cat("- Investigate sample handling at Sites with elevated hemolysis\n")
+cat("- For biomarkers identified as hemolysis-affected, use HBA1 as covariate\n")
+cat("- Sites with sex differences may have biological rather than pre-analytical hemolysis\n")
 
 ```
 

@@ -8,6 +8,7 @@ R code for quality control and analysis of Alamar biomarker data for the U19 Alz
 ├── Primary_QC/           # Primary quality control analyses
 ├── Metadata_Merge/       # Merge biomarker data with metadata
 ├── Replicate_Analysis/   # Replicate sample concordance and CV analysis
+├── Hemolysis_Check/      # Hemolysis marker analysis by site
 ├── U19_Analysis/         # U19 grant-specific association analyses
 ├── Clustering/           # PCA and clustering analyses
 └── Utilities/            # Shared functions and helper scripts
@@ -38,6 +39,19 @@ Analysis of replicate samples for assessing assay reproducibility and concordanc
 - `QC_Pipeline_Replicates.Rmd` - CV analysis and replicate concordance
 
 Open `Replicate_Analysis/Replicate_Analysis.Rproj` in RStudio. Input files are auto-copied from Primary_QC if not present.
+
+### Hemolysis_Check
+Analysis of hemolysis markers (HBA1, PGK1, MDH1, SOD1, ENO2) to identify pre-analytical sample handling issues vs biological hemolysis effects.
+
+**Scripts:**
+- `Hemolysis_by_Site.Rmd` - Comprehensive hemolysis analysis including:
+  - Hemolysis index by site
+  - Sex differences (G6PD-related effects)
+  - Covariate associations
+  - Outlier detection
+  - Technical replicate baseline variance comparison
+
+Open `Hemolysis_Check/Hemolysis_Check.Rproj` in RStudio. Data auto-loads from Metadata_Merge output if not in input_files/.
 
 ### U19_Analysis
 Statistical analyses specific to the U19 grant objectives, including CDX associations and interaction testing.
@@ -76,13 +90,16 @@ The recommended analysis order is:
    └── 2b. Metadata_Merge
            └── Produces: merged datasets, exclusion report, filtered analysis-ready data
 
-3. U19_Analysis
+3. Hemolysis_Check (optional, recommended before association analyses)
+   └── Produces: hemolysis index, outlier flags, biomarker hemolysis assessment
+
+4. U19_Analysis
    a. Univariate analysis first
       └── Produces: biomarker_groups.csv, meta_plus_race_dx.csv
    b. Interaction analysis second
       └── Produces: association results, interaction plots
 
-4. Clustering (optional, for exploratory analysis)
+5. Clustering (optional, for exploratory analysis)
    └── Produces: PCA scores, loadings, metadata associations, outliers
 ```
 
