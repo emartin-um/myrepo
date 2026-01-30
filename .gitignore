@@ -24,3 +24,6 @@
 # Temporary files
 *~
 *.tmp
+
+# Generated plot files
+Rplots.pdf
