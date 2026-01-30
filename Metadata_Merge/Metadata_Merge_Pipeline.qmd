@@ -1,0 +1,644 @@
+---
+title: "Metadata Merge Pipeline"
+subtitle: "Merge Post-QC Biomarker Data with Metadata"
+date: today
+format:
+  html:
+    toc: true
+    toc-float: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show code"
+    embed-resources: true
+params:
+  filter_only: false
+  no_copy: false
+editor: visual
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+
+# Configuration
+PRIMARY_QC_OUTPUT <- "../Primary_QC/output_files"
+INPUT_DIR <- "input_files"
+OUTPUT_DIR <- "output_files"
+NPQ_STANDARD_FILE <- "NPQ_post_QC.csv"
+NPQ_LOW_FILE <- "NPQ_Low_post_QC.csv"
+NPQ_DATE_PATTERN <- NULL  # Set to specific date or NULL for auto-detect
+
+# Get parameters (can be set when rendering)
+FILTER_ONLY <- params$filter_only
+NO_COPY <- params$no_copy
+
+# Create output directory if needed
+if (!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR)
+if (!dir.exists(file.path(OUTPUT_DIR, "filtered"))) dir.create(file.path(OUTPUT_DIR, "filtered"))
+```
+
+# Overview
+
+This pipeline merges post-QC biomarker data with sample metadata and applies exclusion filters to create analysis-ready datasets.
+
+**Pipeline Steps:**
+
+1.  **Input Files** - Verify/copy post-QC files from Primary_QC
+2.  **Merge Data** - Merge biomarker data with metadata
+3.  **Quality Control** - Identify duplicates, implausible values, and issues
+4.  **Apply Filters** - Create final analysis-ready datasets
+
+```{r}
+#| label: mode-display
+#| echo: false
+#| results: asis
+
+if (FILTER_ONLY) {
+  cat("::: {.callout-note}\n")
+  cat("## Filter-Only Mode\n")
+  cat("Running in **filter-only mode** - using existing merged files and exclusion report.\n")
+  cat(":::\n")
+}
+```
+
+```{r}
+#| label: helper-functions
+#| include: false
+
+find_metadata_file <- function(input_dir) {
+  all_files <- list.files(input_dir, full.names = TRUE)
+  metadata_files <- all_files[grepl("metadata", basename(all_files), ignore.case = TRUE)]
+
+  if (length(metadata_files) == 0) {
+    stop("No metadata file found in ", input_dir, "\n",
+         "  Expected: a file with 'metadata' in the name")
+  }
+
+  if (length(metadata_files) > 1) {
+    metadata_files <- metadata_files[which.max(file.mtime(metadata_files))]
+  }
+
+  return(metadata_files)
+}
+
+find_latest_npq_files <- function(output_dir) {
+  standard_files <- list.files(output_dir, pattern = "NPQ_.*_post_QC\\.csv$", full.names = TRUE)
+  standard_files <- standard_files[!grepl("Low|triage", standard_files)]
+
+  low_files <- list.files(output_dir, pattern = "NPQ_.*_Low_post_QC\\.csv$", full.names = TRUE)
+  low_files <- low_files[!grepl("triage", low_files)]
+
+  if (length(standard_files) == 0 || length(low_files) == 0) {
+    stop("Could not find NPQ post-QC files in ", output_dir)
+  }
+
+  list(
+    standard = standard_files[which.max(file.mtime(standard_files))],
+    low = low_files[which.max(file.mtime(low_files))]
+  )
+}
+```
+
+# Step 1: Input Files {#step1}
+
+```{r}
+#| label: step1-input-files
+#| echo: false
+#| results: asis
+
+if (!FILTER_ONLY) {
+  # Check if NPQ files already exist
+  existing_npq <- list.files(INPUT_DIR, pattern = "NPQ", ignore.case = TRUE)
+
+  if (!NO_COPY && length(existing_npq) == 0) {
+    cat("## Copying Files from Primary_QC\n\n")
+
+    npq_files <- find_latest_npq_files(PRIMARY_QC_OUTPUT)
+    standard_src <- npq_files$standard
+    low_src <- npq_files$low
+
+    cat("No NPQ files found in `input_files/` - copying from Primary_QC:\n\n")
+    cat("- **Standard:** `", basename(standard_src), "`\n", sep = "")
+    cat("- **Low:** `", basename(low_src), "`\n\n", sep = "")
+
+    file.copy(standard_src, file.path(INPUT_DIR, NPQ_STANDARD_FILE), overwrite = TRUE)
+    file.copy(low_src, file.path(INPUT_DIR, NPQ_LOW_FILE), overwrite = TRUE)
+
+    cat("Files copied successfully.\n\n")
+    existing_npq <- list.files(INPUT_DIR, pattern = "NPQ", ignore.case = TRUE)
+  } else {
+    cat("## Using Existing Input Files\n\n")
+  }
+
+  # Auto-detect metadata file
+  metadata_file <- find_metadata_file(INPUT_DIR)
+
+  cat("**Input files:**\n\n")
+  cat("| File | Status |\n")
+  cat("|------|--------|\n")
+  for (f in existing_npq) {
+    cat("| `", f, "` | ✓ Found |\n", sep = "")
+  }
+  cat("| `", basename(metadata_file), "` | ✓ Metadata (auto-detected) |\n", sep = "")
+
+} else {
+  cat("*Skipped in filter-only mode*\n\n")
+  cat("Using existing files in `output_files/`\n")
+  metadata_file <- find_metadata_file(INPUT_DIR)
+}
+```
+
+```{r}
+#| label: load-data
+#| include: false
+
+if (!FILTER_ONLY) {
+  # Load metadata
+  metadata <- read_csv(metadata_file, show_col_types = FALSE)
+  metadata <- metadata %>%
+    rename(APOE.geno = APOE) %>%
+    mutate(Group_Race_Ethnicity = paste(Group, Race, Ethnicity, sep = "_"))
+
+  # Load biomarker files
+  biomarkers_postQC <- read_csv(file.path(INPUT_DIR, NPQ_STANDARD_FILE), show_col_types = FALSE)
+  biomarkers_low_postQC <- read_csv(file.path(INPUT_DIR, NPQ_LOW_FILE), show_col_types = FALSE)
+
+  # Clean column names
+  biomarkers_postQC <- biomarkers_postQC %>%
+    rename_with(~str_replace_all(., "[^A-Za-z0-9_]", "_"))
+  biomarkers_low_postQC <- biomarkers_low_postQC %>%
+    rename_with(~str_replace_all(., "[^A-Za-z0-9_]", "_"))
+}
+```
+
+# Step 2: Merge Data {#step2}
+
+```{r}
+#| label: step2-merge
+#| echo: false
+#| results: asis
+
+if (!FILTER_ONLY) {
+  cat("## Merging Biomarker Data with Metadata\n\n")
+
+  # Merge standard
+  merged_standard <- metadata %>%
+    inner_join(biomarkers_postQC, by = c("SAMPLE_ALIQUOT" = "SampleID"), suffix = c("_meta", "_bio")) %>%
+    select(-any_of(c("Run", "Bay")))
+
+  # Merge low
+  merged_low <- metadata %>%
+    inner_join(biomarkers_low_postQC, by = c("SAMPLE_ALIQUOT" = "SampleID"), suffix = c("_meta", "_bio")) %>%
+    select(-any_of(c("Run", "Bay")))
+
+  # Combined biomarkers
+  standard_biomarkers <- setdiff(names(biomarkers_postQC), c("SampleID", "Run", "Bay"))
+  low_biomarkers <- setdiff(names(biomarkers_low_postQC), c("SampleID", "Run", "Bay"))
+  unique_to_low <- setdiff(low_biomarkers, standard_biomarkers)
+
+  combined_biomarkers <- biomarkers_postQC %>%
+    full_join(
+      biomarkers_low_postQC %>% select(SampleID, all_of(unique_to_low)),
+      by = "SampleID"
+    )
+
+  merged_combined <- metadata %>%
+    inner_join(combined_biomarkers, by = c("SAMPLE_ALIQUOT" = "SampleID"), suffix = c("_meta", "_bio"))
+
+  cat("| Dataset | Samples | Columns |\n")
+  cat("|---------|---------|--------|\n")
+  cat("| Metadata | ", nrow(metadata), " | ", ncol(metadata), " |\n", sep = "")
+  cat("| Standard Biomarkers | ", nrow(biomarkers_postQC), " | ", ncol(biomarkers_postQC), " |\n", sep = "")
+  cat("| Low Biomarkers | ", nrow(biomarkers_low_postQC), " | ", ncol(biomarkers_low_postQC), " |\n", sep = "")
+  cat("| **Merged Standard** | ", nrow(merged_standard), " | ", ncol(merged_standard), " |\n", sep = "")
+  cat("| **Merged Low** | ", nrow(merged_low), " | ", ncol(merged_low), " |\n", sep = "")
+  cat("| **Merged Combined** | ", nrow(merged_combined), " | ", ncol(merged_combined), " |\n", sep = "")
+
+} else {
+  cat("*Skipped in filter-only mode*\n\n")
+
+  # Load existing merged files
+  merged_combined <- read_csv(file.path(OUTPUT_DIR, "merged_combined_post_QC.csv"), show_col_types = FALSE)
+  merged_standard <- read_csv(file.path(OUTPUT_DIR, "merged_standard_post_QC.csv"), show_col_types = FALSE)
+  merged_low <- read_csv(file.path(OUTPUT_DIR, "merged_low_post_QC.csv"), show_col_types = FALSE)
+
+  cat("**Using existing merged files:**\n\n")
+  cat("| Dataset | Samples | Columns |\n")
+  cat("|---------|---------|--------|\n")
+  cat("| Merged Standard | ", nrow(merged_standard), " | ", ncol(merged_standard), " |\n", sep = "")
+  cat("| Merged Low | ", nrow(merged_low), " | ", ncol(merged_low), " |\n", sep = "")
+  cat("| Merged Combined | ", nrow(merged_combined), " | ", ncol(merged_combined), " |\n", sep = "")
+}
+```
+
+```{r}
+#| label: samples-not-in-metadata
+#| echo: false
+#| results: asis
+
+if (!FILTER_ONLY) {
+  cat("\n## Samples Not in Metadata\n\n")
+
+  all_npq_samples <- combined_biomarkers %>% select(SampleID) %>% distinct()
+
+  technical_rep_pattern <- "^(SC|NC|IPC|HIHG)|_(SC|NC|IPC|HIHG)_|_(SC|NC|IPC|HIHG)$|HIHG"
+
+  samples_not_in_metadata <- all_npq_samples %>%
+    filter(!SampleID %in% metadata$SAMPLE_ALIQUOT) %>%
+    mutate(is_technical_rep = grepl(technical_rep_pattern, SampleID, ignore.case = TRUE))
+
+  technical_reps <- samples_not_in_metadata %>% filter(is_technical_rep)
+  unmatched_samples <- samples_not_in_metadata %>% filter(!is_technical_rep)
+
+  if (nrow(unmatched_samples) > 0) {
+    cat("::: {.callout-warning}\n")
+    cat("### ", nrow(unmatched_samples), " Sample(s) Not in Metadata\n\n", sep = "")
+    cat("These samples are in NPQ files but NOT in metadata:\n\n")
+    for (s in unmatched_samples$SampleID) {
+      cat("- `", s, "`\n", sep = "")
+    }
+    cat("\nThese samples will NOT be included in merged output files.\n")
+    cat(":::\n\n")
+
+    write_csv(unmatched_samples %>% select(SampleID),
+              file.path(OUTPUT_DIR, "samples_not_in_metadata.csv"))
+  } else {
+    cat("All non-technical samples in NPQ files are present in metadata. ✓\n\n")
+  }
+
+  if (nrow(technical_reps) > 0) {
+    cat("*Technical replicates excluded (expected):* ", nrow(technical_reps), " samples (SC, NC, IPC, HIHG)\n", sep = "")
+  }
+}
+```
+
+```{r}
+#| label: write-merged-files
+#| include: false
+
+if (!FILTER_ONLY) {
+  write_csv(merged_standard, file.path(OUTPUT_DIR, "merged_standard_post_QC.csv"))
+  write_csv(merged_low, file.path(OUTPUT_DIR, "merged_low_post_QC.csv"))
+  write_csv(merged_combined, file.path(OUTPUT_DIR, "merged_combined_post_QC.csv"))
+}
+```
+
+# Step 3: Quality Control {#step3}
+
+```{r}
+#| label: step3-qc-duplicates
+#| echo: false
+#| results: asis
+
+if (!FILTER_ONLY) {
+  cat("## Duplicate Samples\n\n")
+
+  duplicate_report <- merged_combined %>%
+    group_by(SAMPLE) %>%
+    filter(n() > 1) %>%
+    arrange(SAMPLE, RUN) %>%
+    mutate(
+      run_order = row_number(),
+      max_run = max(RUN),
+      exclude = RUN != max_run,
+      exclude_reason = if_else(exclude, paste0("Duplicate - keeping most recent run (", max_run, ")"), NA_character_)
+    ) %>%
+    ungroup()
+
+  if (nrow(duplicate_report) > 0) {
+    n_dup_samples <- n_distinct(duplicate_report$SAMPLE)
+    n_to_exclude <- sum(duplicate_report$exclude)
+
+    cat("Found **", n_dup_samples, "** samples with multiple runs (", nrow(duplicate_report), " total records)\n\n", sep = "")
+    cat("- **", n_to_exclude, "** older runs will be excluded\n", sep = "")
+    cat("- **", nrow(duplicate_report) - n_to_exclude, "** most recent runs will be kept\n\n", sep = "")
+
+    dup_summary <- duplicate_report %>%
+      group_by(SAMPLE) %>%
+      summarise(
+        n_runs = n(),
+        runs = paste(RUN, collapse = ", "),
+        kept_run = max(RUN),
+        .groups = "drop"
+      )
+
+    kable(dup_summary, caption = "Duplicate Samples") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+      print()
+
+  } else {
+    cat("No duplicate samples found. ✓\n")
+  }
+}
+```
+
+```{r}
+#| label: step3-qc-implausible
+#| echo: false
+#| results: asis
+
+if (!FILTER_ONLY) {
+  cat("\n## Implausible Values\n\n")
+
+  plausible_ranges <- list(
+    age_at_subject = c(18, 110),
+    BMI = c(10, 80),
+    weight = c(30, 300),
+    height = c(100, 250)
+  )
+
+  implausible_list <- list()
+
+  for (var in names(plausible_ranges)) {
+    if (var %in% names(merged_combined)) {
+      implausible <- merged_combined %>%
+        filter(!is.na(.data[[var]]) &
+               (.data[[var]] < plausible_ranges[[var]][1] |
+                .data[[var]] > plausible_ranges[[var]][2])) %>%
+        mutate(
+          variable = var,
+          value = .data[[var]],
+          range = paste0("[", plausible_ranges[[var]][1], ", ", plausible_ranges[[var]][2], "]"),
+          exclude_reason = paste0("Implausible ", var, ": ", value, " (expected ", range, ")")
+        ) %>%
+        select(SAMPLE_ALIQUOT, SAMPLE, variable, value, range, exclude_reason)
+
+      if (nrow(implausible) > 0) {
+        implausible_list[[var]] <- implausible
+      }
+    }
+  }
+
+  if (length(implausible_list) > 0) {
+    implausible_report <- bind_rows(implausible_list)
+    cat("Found **", nrow(implausible_report), "** samples with implausible values:\n\n", sep = "")
+
+    kable(implausible_report %>% select(-exclude_reason),
+          caption = "Implausible Values") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+      print()
+
+  } else {
+    implausible_report <- data.frame()
+    cat("No implausible values found. ✓\n")
+  }
+}
+```
+
+```{r}
+#| label: step3-qc-race-ethnicity
+#| echo: false
+#| results: asis
+
+if (!FILTER_ONLY) {
+  cat("\n## Illogical Race/Ethnicity Combinations\n\n")
+
+  illogical_race_eth <- merged_combined %>%
+    filter(
+      (grepl("BL", Group_Race_Ethnicity) & grepl("WH", Group_Race_Ethnicity)) |
+      (grepl("HI", Group_Race_Ethnicity) & grepl("NH", Group_Race_Ethnicity)) |
+      (grepl("AA", Group_Race_Ethnicity) & grepl("WH", Group_Race_Ethnicity)) |
+      (grepl("AFDC", Group_Race_Ethnicity) & grepl("WH", Group_Race_Ethnicity)) |
+      (grepl("AFDC", Group_Race_Ethnicity) & grepl("HI", Group_Race_Ethnicity)) |
+      (grepl("AA", Group_Race_Ethnicity) & grepl("HI", Group_Race_Ethnicity))
+    ) %>%
+    mutate(
+      exclude_reason = paste0("Review: Illogical Race/Ethnicity combination: ", Group_Race_Ethnicity),
+      exclude = FALSE  # Flagged for review but NOT auto-excluded
+    )
+
+  if (nrow(illogical_race_eth) > 0) {
+    cat("::: {.callout-note}\n")
+    cat("### Flagged for Review (Not Auto-Excluded)\n\n")
+    cat("Found **", nrow(illogical_race_eth), "** samples with potentially illogical Race/Ethnicity combinations.\n\n", sep = "")
+    cat("These are flagged in the exclusion report but **not automatically excluded**.\n")
+    cat("Review and manually set `exclude=TRUE` if needed.\n")
+    cat(":::\n\n")
+
+    kable(illogical_race_eth %>%
+            select(SAMPLE_ALIQUOT, SAMPLE, Group, Race, Ethnicity, Group_Race_Ethnicity) %>%
+            distinct(),
+          caption = "Illogical Race/Ethnicity Combinations") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+      print()
+
+  } else {
+    cat("No illogical combinations found. ✓\n")
+  }
+}
+```
+
+```{r}
+#| label: build-exclusion-report
+#| include: false
+
+if (!FILTER_ONLY) {
+  # Build exclusion report
+  exclusion_report <- merged_combined %>%
+    select(SAMPLE_ALIQUOT, SAMPLE, RUN, Group, Race, Ethnicity, Group_Race_Ethnicity,
+           Case_Control, sex, age_at_subject, CDX, APOE.geno, Site) %>%
+    mutate(exclude = FALSE, exclude_reason = NA_character_)
+
+  # Mark duplicates
+  if (nrow(duplicate_report) > 0) {
+    exclusion_report <- exclusion_report %>%
+      left_join(
+        duplicate_report %>% select(SAMPLE_ALIQUOT, exclude, exclude_reason) %>% filter(exclude),
+        by = "SAMPLE_ALIQUOT", suffix = c("", "_dup")
+      ) %>%
+      mutate(
+        exclude = coalesce(exclude_dup, exclude),
+        exclude_reason = coalesce(exclude_reason_dup, exclude_reason)
+      ) %>%
+      select(-exclude_dup, -exclude_reason_dup)
+  }
+
+  # Mark implausible values
+  if (nrow(implausible_report) > 0) {
+    implausible_combined <- implausible_report %>%
+      group_by(SAMPLE_ALIQUOT) %>%
+      summarise(exclude_reason_implausible = paste(exclude_reason, collapse = "; "), .groups = "drop") %>%
+      mutate(exclude_implausible = TRUE)
+
+    exclusion_report <- exclusion_report %>%
+      left_join(implausible_combined, by = "SAMPLE_ALIQUOT") %>%
+      mutate(
+        exclude_reason = case_when(
+          !is.na(exclude_reason) & !is.na(exclude_reason_implausible) ~
+            paste(exclude_reason, exclude_reason_implausible, sep = "; "),
+          !is.na(exclude_reason_implausible) ~ exclude_reason_implausible,
+          TRUE ~ exclude_reason
+        ),
+        exclude = exclude | coalesce(exclude_implausible, FALSE)
+      ) %>%
+      select(-exclude_reason_implausible, -exclude_implausible)
+  }
+
+  # Mark illogical race/ethnicity (for review, not auto-exclude)
+  if (nrow(illogical_race_eth) > 0) {
+    race_eth_combined <- illogical_race_eth %>%
+      group_by(SAMPLE_ALIQUOT) %>%
+      summarise(exclude_reason_race_eth = first(exclude_reason), .groups = "drop")
+
+    exclusion_report <- exclusion_report %>%
+      left_join(race_eth_combined, by = "SAMPLE_ALIQUOT") %>%
+      mutate(
+        exclude_reason = case_when(
+          !is.na(exclude_reason) & !is.na(exclude_reason_race_eth) ~
+            paste(exclude_reason, exclude_reason_race_eth, sep = "; "),
+          !is.na(exclude_reason_race_eth) ~ exclude_reason_race_eth,
+          TRUE ~ exclude_reason
+        )
+      ) %>%
+      select(-exclude_reason_race_eth)
+  }
+
+  write_csv(exclusion_report, file.path(OUTPUT_DIR, "sample_exclusion_report.csv"))
+}
+```
+
+# Step 4: Exclusion Summary {#step4}
+
+```{r}
+#| label: step4-exclusion-summary
+#| echo: false
+#| results: asis
+
+exclusion_report <- read_csv(file.path(OUTPUT_DIR, "sample_exclusion_report.csv"), show_col_types = FALSE)
+
+n_total <- nrow(exclusion_report)
+n_exclude <- sum(exclusion_report$exclude)
+n_keep <- sum(!exclusion_report$exclude)
+
+cat("## Summary\n\n")
+
+cat("| Metric | Count | Percent |\n")
+cat("|--------|-------|--------|\n")
+cat("| Total samples | ", n_total, " | 100% |\n", sep = "")
+cat("| Samples to **EXCLUDE** | ", n_exclude, " | ", round(100*n_exclude/n_total, 1), "% |\n", sep = "")
+cat("| Samples to **KEEP** | ", n_keep, " | ", round(100*n_keep/n_total, 1), "% |\n", sep = "")
+cat("\n")
+
+if (n_exclude > 0) {
+  cat("## Exclusion Reasons\n\n")
+
+  reasons <- exclusion_report %>%
+    filter(exclude) %>%
+    count(exclude_reason, sort = TRUE)
+
+  kable(reasons, col.names = c("Reason", "Count"),
+        caption = "Samples Excluded") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    print()
+}
+
+# Show flagged but not excluded
+review_items <- exclusion_report %>%
+  filter(!exclude & !is.na(exclude_reason) & exclude_reason != "")
+
+if (nrow(review_items) > 0) {
+  cat("\n## Flagged for Review (Not Excluded)\n\n")
+
+  review_reasons <- review_items %>% count(exclude_reason, sort = TRUE)
+
+  kable(review_reasons, col.names = c("Reason", "Count"),
+        caption = "Samples Flagged for Review") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    print()
+}
+```
+
+# Step 5: Apply Filters {#step5}
+
+```{r}
+#| label: step5-apply-filters
+#| echo: false
+#| results: asis
+
+cat("## Applying Exclusion Filters\n\n")
+
+# Get samples to exclude
+samples_to_exclude <- exclusion_report %>%
+  filter(exclude) %>%
+  pull(SAMPLE_ALIQUOT)
+
+cat("Excluding **", length(samples_to_exclude), "** samples from merged datasets...\n\n", sep = "")
+
+# Filter datasets
+filtered_standard <- merged_standard %>%
+  filter(!SAMPLE_ALIQUOT %in% samples_to_exclude)
+
+filtered_low <- merged_low %>%
+  filter(!SAMPLE_ALIQUOT %in% samples_to_exclude)
+
+filtered_combined <- merged_combined %>%
+  filter(!SAMPLE_ALIQUOT %in% samples_to_exclude)
+
+# Write filtered files
+write_csv(filtered_standard, file.path(OUTPUT_DIR, "filtered", "filtered_standard_post_QC.csv"))
+write_csv(filtered_low, file.path(OUTPUT_DIR, "filtered", "filtered_low_post_QC.csv"))
+write_csv(filtered_combined, file.path(OUTPUT_DIR, "filtered", "filtered_combined_post_QC.csv"))
+
+cat("| Dataset | Before | After | Excluded |\n")
+cat("|---------|--------|-------|----------|\n")
+cat("| Standard | ", nrow(merged_standard), " | ", nrow(filtered_standard), " | ", nrow(merged_standard) - nrow(filtered_standard), " |\n", sep = "")
+cat("| Low | ", nrow(merged_low), " | ", nrow(filtered_low), " | ", nrow(merged_low) - nrow(filtered_low), " |\n", sep = "")
+cat("| Combined | ", nrow(merged_combined), " | ", nrow(filtered_combined), " | ", nrow(merged_combined) - nrow(filtered_combined), " |\n", sep = "")
+```
+
+# Output Files {#output}
+
+```{r}
+#| label: output-summary
+#| echo: false
+#| results: asis
+
+cat("## Files Generated\n\n")
+
+cat("### Merged Files (`output_files/`)\n\n")
+cat("| File | Samples | Columns |\n")
+cat("|------|---------|--------|\n")
+merged_files <- c("merged_standard_post_QC.csv", "merged_low_post_QC.csv", "merged_combined_post_QC.csv")
+for (f in merged_files) {
+  fp <- file.path(OUTPUT_DIR, f)
+  if (file.exists(fp)) {
+    df <- read_csv(fp, show_col_types = FALSE)
+    cat("| `", f, "` | ", nrow(df), " | ", ncol(df), " |\n", sep = "")
+  }
+}
+
+cat("\n### Filtered Files (`output_files/filtered/`)\n\n")
+cat("| File | Samples | Columns |\n")
+cat("|------|---------|--------|\n")
+filtered_files <- list.files(file.path(OUTPUT_DIR, "filtered"), pattern = "\\.csv$")
+for (f in filtered_files) {
+  fp <- file.path(OUTPUT_DIR, "filtered", f)
+  df <- read_csv(fp, show_col_types = FALSE)
+  cat("| `", f, "` | ", nrow(df), " | ", ncol(df), " |\n", sep = "")
+}
+
+cat("\n### Reports\n\n")
+cat("- `output_files/sample_exclusion_report.csv` - Full exclusion report\n")
+if (file.exists(file.path(OUTPUT_DIR, "samples_not_in_metadata.csv"))) {
+  cat("- `output_files/samples_not_in_metadata.csv` - Samples missing from metadata\n")
+}
+```
+
+::: callout-tip
+## Pipeline Complete!
+
+Filtered datasets are ready for downstream analysis in `output_files/filtered/`.
+:::
+
+## Next Steps
+
+To manually edit exclusions and re-run filtering: 1. Open `output_files/sample_exclusion_report.csv` 2. Change `exclude` column as needed 3. Re-render this document with `filter_only: true`:
+
+``` r
+quarto::quarto_render("Metadata_Merge_Pipeline.qmd",
+                      execute_params = list(filter_only = TRUE))
+```

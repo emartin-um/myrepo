@@ -179,6 +179,56 @@ cat("Metadata columns:", ncol(metadata), "\n")
 cat("Biomarker columns added:", ncol(merged_low) - ncol(metadata), "\n")
 ```
 
+## Samples in NPQ Files Not in Metadata
+
+```{r}
+#| label: samples-not-in-metadata
+#| echo: false
+#| results: asis
+
+# Get all unique sample IDs from combined biomarkers
+all_npq_samples <- combined_biomarkers %>%
+  select(SampleID) %>%
+  distinct()
+
+# Find samples not in metadata (excluding technical replicates like SC, NC, IPC, HIHG)
+# Technical replicates typically have patterns like "SC", "NC", "IPC", or contain "HIHG"
+technical_rep_pattern <- "^(SC|NC|IPC|HIHG)|_(SC|NC|IPC|HIHG)_|_(SC|NC|IPC|HIHG)$|HIHG"
+
+samples_not_in_metadata <- all_npq_samples %>%
+  filter(!SampleID %in% metadata$SAMPLE_ALIQUOT) %>%
+  mutate(
+    is_technical_rep = grepl(technical_rep_pattern, SampleID, ignore.case = TRUE)
+  )
+
+# Separate technical replicates from other unmatched samples
+technical_reps <- samples_not_in_metadata %>% filter(is_technical_rep)
+unmatched_samples <- samples_not_in_metadata %>% filter(!is_technical_rep)
+
+cat("=== SAMPLES IN NPQ FILES NOT IN METADATA ===\n\n")
+
+if (nrow(unmatched_samples) > 0) {
+  cat("**WARNING:** Found", nrow(unmatched_samples), "sample(s) in NPQ files that are NOT in metadata:\n\n")
+  for (s in unmatched_samples$SampleID) {
+    cat("  -", s, "\n")
+  }
+  cat("\nThese samples will NOT be included in merged output files.\n")
+  cat("Please verify if these samples should be added to the metadata file.\n\n")
+
+  # Write to file for reference
+  write_csv(unmatched_samples %>% select(SampleID),
+            "output_files/samples_not_in_metadata.csv")
+  cat("List saved to: output_files/samples_not_in_metadata.csv\n\n")
+} else {
+  cat("All non-technical samples in NPQ files are present in metadata. ✓\n\n")
+}
+
+if (nrow(technical_reps) > 0) {
+  cat("**Technical replicates excluded (expected):**", nrow(technical_reps), "samples\n")
+  cat("  (These are QC samples like SC, NC, IPC, HIHG that are not expected in metadata)\n")
+}
+```
+
 ## Write Merged Files
 
 ```{r}
@@ -268,6 +318,7 @@ if (length(implausible_list) > 0) {
 
 # Check for illogical Race/Ethnicity combinations
 # Flag only clear contradictions (mutually exclusive categories appearing together)
+# NOTE: These are flagged for review but NOT automatically excluded
 illogical_race_eth <- merged_combined %>%
   filter(
     # Black AND White in same entry
@@ -284,8 +335,8 @@ illogical_race_eth <- merged_combined %>%
     (grepl("AA", Group_Race_Ethnicity) & grepl("HI", Group_Race_Ethnicity))
   ) %>%
   mutate(
-    exclude_reason = paste0("Illogical Race/Ethnicity combination: ", Group_Race_Ethnicity),
-    exclude = TRUE
+    exclude_reason = paste0("Review: Illogical Race/Ethnicity combination: ", Group_Race_Ethnicity),
+    exclude = FALSE
   )
 
 if (nrow(illogical_race_eth) > 0) {
@@ -390,10 +441,11 @@ if (nrow(implausible_report) > 0) {
 }
 
 if (nrow(illogical_race_eth) > 0) {
-  cat("**Illogical Race/Ethnicity Combinations:**\n")
+  cat("**Illogical Race/Ethnicity Combinations (flagged for review, NOT auto-excluded):**\n")
   cat("  - Found", nrow(illogical_race_eth), "samples with inconsistent Race/Ethnicity coding\n")
   cat("  - Examples:", paste(head(unique(illogical_race_eth$Group_Race_Ethnicity), 5), collapse = ", "), "\n")
-  cat("  - These may indicate data entry errors that need manual review\n\n")
+  cat("  - These are flagged in exclude_reason but NOT automatically excluded\n")
+  cat("  - Review in sample_exclusion_report.csv and manually set exclude=TRUE if needed\n\n")
 } else {
   cat("**Illogical Race/Ethnicity Combinations:** None found\n\n")
 }

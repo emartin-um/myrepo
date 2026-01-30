@@ -27,19 +27,9 @@ Open `Primary_QC/Primary_QC.Rproj` in RStudio.
 Merges post-QC biomarker data with sample metadata. Identifies and handles duplicates and implausible values.
 
 **Scripts:**
-- `run_metadata_merge.R` - Automated pipeline script (run from command line)
-- `File_Merge.qmd` - Merge biomarker data with metadata, generate exclusion report
-- `Apply_Filters.qmd` - Apply exclusions and create analysis-ready datasets
+- `Metadata_Merge_Pipeline.qmd` - Main pipeline (generates HTML report)
 
-**Usage:**
-```bash
-cd Metadata_Merge/
-Rscript run_metadata_merge.R           # Full pipeline (prompts before copying)
-Rscript run_metadata_merge.R --no-copy # Skip copy, use existing input files
-Rscript run_metadata_merge.R --filter-only # Re-run filtering only
-```
-
-Open `Metadata_Merge/Metadata_Merge.Rproj` in RStudio.
+Open `Metadata_Merge/Metadata_Merge.Rproj` in RStudio and render the qmd file.
 
 ### Replicate_Analysis
 Analysis of replicate samples for assessing assay reproducibility and concordance.
@@ -79,20 +69,20 @@ The recommended analysis order is:
 ```
 1. Primary_QC
    └── Produces: NPQ_post_QC.csv, biomarker/sample summaries
+   │
+   ├── 2a. Replicate_Analysis (optional, can run after Primary_QC)
+   │       └── Produces: CV statistics, concordance reports
+   │
+   └── 2b. Metadata_Merge
+           └── Produces: merged datasets, exclusion report, filtered analysis-ready data
 
-2. Metadata_Merge
-   └── Produces: merged datasets, exclusion report, filtered analysis-ready data
-
-3. Replicate_Analysis (optional, for QC assessment)
-   └── Produces: CV statistics, concordance reports
-
-4. U19_Analysis
+3. U19_Analysis
    a. Univariate analysis first
       └── Produces: biomarker_groups.csv, meta_plus_race_dx.csv
    b. Interaction analysis second
       └── Produces: association results, interaction plots
 
-5. Clustering (optional, for exploratory analysis)
+4. Clustering (optional, for exploratory analysis)
    └── Produces: PCA scores, loadings, metadata associations, outliers
 ```
 

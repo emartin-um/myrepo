@@ -1473,34 +1473,15 @@ for (biom in my_biomarkers) {
 
 ```
 
-Notes: 
+# Dataset Notes
 
-* CV is not appropriate for NPQs because it is log2. We have to go back to the ratio before we took the log.
-
-* For some biomarkers, e.g. Oligo-SNCA,pTau-217 the HIHG controls look like NC. Maybe they really don't have any of the protein. The SC and IPC must be specifically pooled to have some.
-For some, HIHG controls are between SC and NC, e.g., PGK1, AB38, IL17A
-
-* NEFH is pretty bad across reps types. Everything is mixed with NCs. Very low reads for all reps. What does it look like for non-rep samples?
-
-* IL17A only looks off for 1125-Bay1. THERE IS ONE OUTLYING IPC REP IN THAT PLATE. It is hard to tell about the other reps because that one is so far out.It looks only that first Bay is bad. Check the median. Check Non-Rep samples for a trend. Drop the Bay and see if that fixes CV for this biomarker.
-
-* NPTX1 too.1007-Bay3 has an outlying IPC. Seems to have some Bay effects too.
-* FCN2 0711-Bay3 has outlying IPC. 1124 Bay2 is off too.
-
-* IL10 first run has some spread IPCs and SCs. Some outlier IPCs. 
-* SFRP1 Bay differences for the first Run and last two. Bad for HIHG reps even though has sufficient reads. Lower reads for other reps- some <500.
-
-* ANXA5 shows some bay differences in HIHG for the last two runs
-
-* CRP has a lot of variation in NCs for some plates
-
-* Look specifically for biomarkers with high CV for IPCs. IPCs can have variation across bays and runs as long as they track with the other reps. Within Bay-high CV may be most indicative of an IPC problem, e.g., AB38
-
-
-* It is interesting that HIHG Reps have CVs that get worse for increasing Bays. Bay3 is always the worst location. This is worrisome, because HIHG reps are more representative of our single samples than a pool. If we consistently have more variation in Bay3, that's a problem.
-
-* Make a rule to ignore reps if <500 reads. This will take care of the HIHG-only problems.
-
-* 13.28785664 = log2(10001) This is what happens when the ratio is 1. Why are so many IPCs taking on this value across biomarkers? Because they are actually IPC normalized, so the ones with 1 are the medians. Every plate has one that has this value. So the CV of the IPC normalized values may not really matter a lot??
-
-* Look at outliers on sample plots. Are they triaged?
+```{r notes, echo=FALSE, results='asis'}
+# Read notes from external file (not tracked in git)
+# Create notes.md in this directory to add dataset-specific notes
+notes_file <- "notes.md"
+if (file.exists(notes_file)) {
+  cat(paste(readLines(notes_file, warn = FALSE), collapse = "\n"))
+} else {
+  cat("*No notes file found. Create `notes.md` in this directory to add dataset-specific notes.*\n")
+}
+```
