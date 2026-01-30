@@ -17,16 +17,14 @@ Look at CVs within plates, within Runs and overall
 
 12/23/2025 This version corrects the CV calculation to work with the ratio before taking log2 for the NPQ.
 
-**For a new QC run, change title in YAML, NPQ input file name and this RMarkdown file name (where .html output will go)**
+**For a new QC run, change the title in YAML and this RMarkdown file name (where .html output will go)**
 
 
 ## A.1 Input Data
 
-**You must specify the input NPQ filename below in section A.3**
+Input files are auto-detected from `input_files/`. If no NPQ file is found, the pipeline will attempt to copy from `Primary_QC/output_files/`.
 
-* Example: NPQ_data <- "NPQ_20250923.csv" 
-
-**Required Input Data Files:** Place all files in a folder called `input_files` in the working directory.
+**Required Input Data Files:** Place all files in a folder called `input_files` in the working directory (or let the pipeline copy them from Primary_QC).
 
 1. **Biomarker NPQ data** (`NPQ_xxxxxxxx.csv`) – Rows: biomarkers; Columns: samples; downloaded from NAS. Assign the filename to the variable `NPQ_data` below.
 2. **Raw count data** (`Raw_counts.csv`) – Rows: biomarkers; Columns: samples; exported from NPQ_Values.xlsx.
@@ -47,18 +45,90 @@ Adjustable QC parameters include:
 |-----------|---------|-------------|
 cv_threshold = 20
 
-## A.3 Initial Setup 
+## A.3 Initial Setup
 
 ```{r setup, message=FALSE, warning=FALSE}
 library(tidyverse)
 
-# Input NPQ filename
+# ==============================================================================
+# INPUT FILE SETUP
+# ==============================================================================
 
-NPQ_data <- "NPQ_20251220.csv" #SPECIFY THE FILE NAME CONTAINING NPQ DATA
+# Create input/output directories if they don't exist
+if (!dir.exists("input_files")) dir.create("input_files")
+if (!dir.exists("output_files")) dir.create("output_files")
+
+# Check if input files exist, if not copy from Primary_QC
+primary_qc_dir <- "../Primary_QC/output_files"
+
+# --- NPQ file ---
+# Look for NPQ file in input_files (any file starting with NPQ and ending in .csv)
+npq_files <- list.files("input_files", pattern = "^NPQ.*\\.csv$", full.names = TRUE)
+
+if (length(npq_files) == 0 && dir.exists(primary_qc_dir)) {
+  # No NPQ file found - try to copy from Primary_QC
+  primary_npq <- list.files(primary_qc_dir, pattern = "^NPQ.*\\.csv$", full.names = TRUE)
+  # Exclude Low detectability files
+  primary_npq <- primary_npq[!grepl("Low", primary_npq)]
+
+  if (length(primary_npq) > 0) {
+    # Use most recent file if multiple exist
+    if (length(primary_npq) > 1) {
+      primary_npq <- primary_npq[which.max(file.mtime(primary_npq))]
+    }
+    file.copy(primary_npq, "input_files/")
+    message("Copied NPQ file from Primary_QC: ", basename(primary_npq))
+    npq_files <- list.files("input_files", pattern = "^NPQ.*\\.csv$", full.names = TRUE)
+  }
+}
+
+# Set NPQ filename (use most recent if multiple)
+if (length(npq_files) > 0) {
+  if (length(npq_files) > 1) {
+    npq_files <- npq_files[which.max(file.mtime(npq_files))]
+  }
+  NPQ_data <- basename(npq_files)
+} else {
+  stop("No NPQ file found in input_files/ and could not copy from Primary_QC/output_files/")
+}
+
+# --- Raw counts file ---
+if (!file.exists("input_files/Raw_counts.csv") && dir.exists(primary_qc_dir)) {
+  primary_raw <- file.path(primary_qc_dir, "Raw_counts.csv")
+  if (file.exists(primary_raw)) {
+    file.copy(primary_raw, "input_files/")
+    message("Copied Raw_counts.csv from Primary_QC")
+  }
+}
+
+# --- Sample_QC.csv file ---
+if (!file.exists("input_files/Sample_QC.csv") && dir.exists(primary_qc_dir)) {
+  primary_qc <- file.path(primary_qc_dir, "Sample_QC.csv")
+  if (file.exists(primary_qc)) {
+    file.copy(primary_qc, "input_files/")
+    message("Copied Sample_QC.csv from Primary_QC")
+  }
+}
+
+# --- Replicate list ---
+# This file must be created by analyst - cannot auto-copy
+if (!file.exists("input_files/Replicate_list.csv")) {
+  warning("Replicate_list.csv not found in input_files/. This file must be created manually.")
+}
+
+# ==============================================================================
+# PARAMETERS
+# ==============================================================================
 
 cv_threshold = 25
 
 ```
+
+**Input files detected:**
+- NPQ file: `r NPQ_data`
+- Raw counts: `r if(file.exists("input_files/Raw_counts.csv")) "Found" else "MISSING"`
+- Sample QC: `r if(file.exists("input_files/Sample_QC.csv")) "Found" else "MISSING"`
+- Replicate list: `r if(file.exists("input_files/Replicate_list.csv")) "Found" else "MISSING - must create manually"`
 ---
   
 # B. Data Formatting

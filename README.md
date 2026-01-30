@@ -35,9 +35,9 @@ Open `Metadata_Merge/Metadata_Merge.Rproj` in RStudio and render the qmd file.
 Analysis of replicate samples for assessing assay reproducibility and concordance.
 
 **Scripts:**
-- `QC_Pipeline_Replicates_ALZ_12_29_25.Rmd` - CV analysis and replicate concordance
+- `QC_Pipeline_Replicates.Rmd` - CV analysis and replicate concordance
 
-Open `Replicate_Analysis/Replicate_Analysis.Rproj` in RStudio.
+Open `Replicate_Analysis/Replicate_Analysis.Rproj` in RStudio. Input files are auto-copied from Primary_QC if not present.
 
 ### U19_Analysis
 Statistical analyses specific to the U19 grant objectives, including CDX associations and interaction testing.
