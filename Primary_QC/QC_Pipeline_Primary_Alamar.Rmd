@@ -158,7 +158,7 @@ library(tidyr)
 rep <- read_csv("input_files/Replicate_list.csv", show_col_types = FALSE)
 hihg_reps <- combined_df[rownames(combined_df) %in% rep[[1]], ]
 
-combined_df <- combined_df[!rownames(combined_df) %in% hihg_reps, ]
+combined_df <- combined_df[!rownames(combined_df) %in% rownames(hihg_reps), ]
 
 # Identify Alamar controls and (SC, IPC, and NC) and pull out from main dataset
 nc_samples   <- combined_df[grepl("^NC", rownames(combined_df)), ]
@@ -226,8 +226,7 @@ print(bad_samples)
 ### B.2.1 Non-replicate Sample Counts
   
 ```{r sample-counts, message=FALSE, warning=FALSE, echo=TRUE}
-# Remove Hihg Reps. SC, NC and IPC are removed above
-combined_df <- combined_df[!rownames(combined_df) %in% rep[[1]], ]
+# HIHG Reps, SC, NC and IPC are already removed above
 
 # Summarize counts by Run × Bay
 nonrep_summary <- combined_df %>%

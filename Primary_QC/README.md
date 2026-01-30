@@ -31,8 +31,8 @@ Main QC pipeline for Alamar fluid biomarker data.
 | `min_detectability_qc` | 98 | Minimum detectability (%) to retain biomarker in QC Biomarker dataset |
 | `read_count_threshold` | 500 | Minimum mean/median raw reads per sample for QC |
 | `corr_thresh` | 0.4 | Maximum correlation coefficient allowed between biomarkers in QC Biomarker dataset |
-| `samp_out_thresh` | 1.5 | Multiplier for IQR to determine if a sample if an outlier from the median NPQ for a biomarker|
-| `read_out_thresh` | 4 | Multiplier for IQR to determine if a sample if an outlier from the median for Total Reads|
+| `samp_out_thresh` | 1.5 | Multiplier for IQR to determine if a sample is an outlier from the median NPQ for a biomarker|
+| `read_out_thresh` | 4 | Multiplier for IQR to determine if a sample is an outlier from the median for Total Reads|
 | `FDR_threshold` | 0.01 | Significance threshold for outlier burden |
 
 **Required Input Files:**
