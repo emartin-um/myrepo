@@ -41,7 +41,12 @@ Applies exclusion filters from File_Merge.qmd to the merged datasets:
 **Usage:**
 ```bash
 cd Utilities/
+
+# Full pipeline
 Rscript run_data_merge_pipeline.R
+
+# Re-run filtering only (after manually editing exclusion report)
+Rscript run_data_merge_pipeline.R --filter-only
 ```
 
 **Configuration:**
@@ -55,6 +60,11 @@ Rscript run_data_merge_pipeline.R
 **Output:**
 - Prints summary of exclusion reasons and counts
 - Final filtered datasets in `output_files/filtered/`
+
+**Manual Exclusion Editing:**
+1. Run the full pipeline first
+2. Edit `output_files/sample_exclusion_report.csv` - change `exclude` column from `TRUE` to `FALSE` for samples you want to keep
+3. Run `Rscript run_data_merge_pipeline.R --filter-only` to re-apply filters
 
 ## Function Reference (shared_functions.R)
 
