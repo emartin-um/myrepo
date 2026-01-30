@@ -1,0 +1,1323 @@
+---
+title: "Primary QC of Biomarker Data for ALZ123 Combined Datasets"
+author: "ERM"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+# A. Overview
+
+This protocol describes a workflow for primary **quality control (QC)** of biomarker datasets measured across multiple assay plates (Runs and Bays). 
+
+* The protocol first identifies a set of high-quality biomarkers with low correlation as the **QC Biomarker Set**. 
+
+* Next it uses the QC Biomarker Set to identify samples to "triage" for further inspection based on automated checks (e.g., PCA, outliers)
+
+* It further identifies samples that should be "flagged", i.e., noted but not as bad as triage.
+
+* All biomarkers are then reintegrated, but separated into two sets: 1) those with low detectability and/or low read count, and 2) all remaining biomarkers.
+
+* Finally, post-QC NPQ data are written to output files, separated by the two biomarker groups as well as triaged and non-triaged samples. 
+
+QC analyses are **agnostic** to phenotypic and covariate information.
+
+**For a new QC run, change title in YAML, NPQ input file name and this RMarkdown file name (where .html output will go)**
+
+
+## A.1 Input Data
+
+**You must specify the input NPQ filename below in section A.3**
+
+* Example: NPQ_data <- "NPQ_20250923.csv" 
+
+**Required Input Data Files:** Place all files in a folder called `input_files` in the working directory.
+
+1. **Biomarker NPQ data** (`NPQ_xxxxxxxx.csv`) – Rows: biomarkers; Columns: samples; downloaded from NAS. Assign the filename to the variable `NPQ_data` below.
+2. **Alamar sample QC info** (`Sample_QC.csv`) – Rows: biomarkers; Columns: annotation information (IC Median, Detactability, QC Status, etc.). Exported from NPQ_Values.xlsx.
+3. **Raw count data** (`Raw_counts.csv`) – Rows: biomarkers; Columns: samples; exported from NPQ_Values.xlsx.
+4. **Detectability summary** (`biomarker_detectability.csv`) – Rows: biomarkers; Columns: detectability per plate and overall.
+5. **Annotation for biomarkers** (`Annotation_Targets.csv`) – Rows: samples; Columns: annotation information (LOD, NPQ values, plateID, etc.). Exported from NPQ_Values.xlsx.
+6. **Replicate list** (`Replicate_list.csv`) – List of HIHG-replicate sample IDs for assay precision checks. Created by analyst.
+
+* Previously, I included `QC_droplist.csv` to flag samples with warnings from Alamar. I'm now going to automate this and list them in the summary. 
+
+**Output Data Files:** Analyst should create a folder `output_files` in the working directory.
+
+1. `NPQxxx_post_QC.csv` – QC’d samples (without triaged samples) with biomarkers having **Min Detectability >50%** and **mean/median raw-read counts >500**.
+2. `NPQxxx_Low_post_QC.csv` – QC'd Samples (without triaged samples) failing detectability or read count thresholds.
+3. `NPQxxx_post_QC_triage.csv` – Same as above from triaged samples.
+4. `NPQxxx_Low_post_QC_triage.csv` – Same as above from triaged samples.
+5. Additional ancillary files for outliers, PCA coordinates, flagged samples, etc.
+6. I'd like to add a pdf summary to export with final data.
+
+
+## A.2 Thresholds
+
+Adjustable QC parameters include:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `PCA_SD` | 5 | Number of SDs from mean to define PCA outliers |
+| `min_detectability` | 50 | Minimum detectability (%) to retain biomarker in post-QC dataset |
+| `min_detectability_qc` | 98 | Minimum detectability (%) to retain biomarker in QC Biomarker dataset |
+| `read_count_threshold` | 500 | Minimum mean/median raw reads per sample for QC |
+| `corr_thresh` | 0.4 | Maximum correlation coefficient allowed between biomarkers in QC Biomarker dataset |
+| `samp_out_thresh` | 1.5 | Multiplier for IQR to determine if a sample if an outlier from the median NPQ for a biomarker|
+| `read_out_thresh` | 4 | Multiplier for IQR to determine if a sample if an outlier from the median for Total Reads|
+| `FDR_threshold` | 0.01 | Significance threshold for outlier burden |
+
+
+## A.3 Initial Setup 
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+# Input NPQ filename
+
+NPQ_data <- "NPQ_20251220.csv" #SPECIFY THE FILE NAME CONTAINING NPQ DATA
+
+# Create output folder if it doesn't exist
+if (!dir.exists("output_files")) dir.create("output_files")
+
+# Thresholds
+PCA_SD <- 5
+min_detectability <- 50
+min_detectability_qc <-98
+corr_thresh <- 0.4
+read_count_threshold <- 500
+samp_out_thresh <- 1.5
+read_out_thresh <- 4
+FDR_threshold <- 0.01
+```
+---
+  
+# B. Data Formatting
+This section formats the data and produces initial summaries.
+
+Input file is: `r NPQ_data`
+
+```{r load-and-format, message=FALSE, warning=FALSE, echo=TRUE}
+library(tidyverse)
+
+# --- Read biomarker NPQ data ---
+df <- read_csv(file.path("input_files", NPQ_data), show_col_types = FALSE)
+
+# First column = biomarker names
+biomarker_names <- df[[1]]
+df <- df[, -1]
+
+# Make matrix (rows = biomarkers, cols = samples)
+combined_numeric <- as.matrix(df)
+rownames(combined_numeric) <- biomarker_names
+
+
+# Transpose to samples in rows
+combined_t <- t(combined_numeric)
+
+# Convert to data.frame
+combined_df <- as.data.frame(combined_t)
+
+# --- Read metadata ---
+#I CHANGED THIS TO JUST READ IN SAMPLE_QC, WHICH CONTAINS THE SAMPLE INFO. WE DON'T NEED THIS FILE.
+alamar_qc <- read_csv("input_files/Sample_QC.csv", skip=12, show_col_types = FALSE)
+
+# Extract Run and Bay from plateID
+meta_df <- alamar_qc %>%
+  mutate(
+    Run = stringr::str_extract(plateID, "^[0-9]{8}-[0-9]{4}"),
+    Bay = stringr::str_extract(plateID, "Bay[0-9]+")
+  ) %>%
+  transmute(SampleID = `Sample Name`, Run, Bay)
+
+# Keep only samples present in combined_df
+meta_df <- meta_df[meta_df$SampleID %in% rownames(combined_df), ]
+
+# Reorder to match rownames
+meta_df <- meta_df[match(rownames(combined_df), meta_df$SampleID), ]
+
+# Add Run and Bay columns at the front
+combined_df$Run <- meta_df$Run
+combined_df$Bay <- meta_df$Bay
+combined_df <- combined_df %>% select(Run, Bay, everything())
+rownames(combined_df) <- rownames(combined_t)
+```
+
+## B.1 Initial Cleaning
+
+### B.1.1 HIHG Replicates and Control Samples
+Pull out Alamar control and HIHG replicate samples for examination in later pipeline stages.
+
+```{r special_samples, message=FALSE, warning=FALSE, echo=TRUE}
+library(dplyr)
+library(tidyr)
+
+# --- Read HIHG replicate list ---
+rep <- read_csv("input_files/Replicate_list.csv", show_col_types = FALSE)
+hihg_reps <- combined_df[rownames(combined_df) %in% rep[[1]], ]
+
+combined_df <- combined_df[!rownames(combined_df) %in% hihg_reps, ]
+
+# Identify Alamar controls and (SC, IPC, and NC) and pull out from main dataset
+nc_samples   <- combined_df[grepl("^NC", rownames(combined_df)), ]
+sc_samples   <- combined_df[grepl("^SC", rownames(combined_df)), ]
+ipc_samples  <- combined_df[grepl("^IPC", rownames(combined_df)), ]
+
+combined_df <- combined_df[!grepl("^(NC|IPC|SC)", rownames(combined_df)), ]
+
+# Function to summarize counts by Run and Bay
+summarize_counts <- function(df, type_name) {
+  df %>%
+    group_by(Run, Bay) %>%
+    summarise(!!type_name := n(), .groups = "drop")
+}
+
+# Summarize each type
+nc_summary   <- summarize_counts(nc_samples, "NC")
+sc_summary   <- summarize_counts(sc_samples, "SC")
+ipc_summary  <- summarize_counts(ipc_samples, "IPC")
+hihg_summary <- summarize_counts(hihg_reps, "HIHG_Replicate")
+
+# Combine into a single table
+control_summary <- full_join(nc_summary, ipc_summary, by = c("Run","Bay")) %>%
+                   full_join(sc_summary, by = c("Run","Bay")) %>%
+                   full_join(hihg_summary, by = c("Run","Bay")) %>%
+                   replace_na(list(NC = 0, IPC = 0, SC = 0, HIHG_Replicate = 0)) %>%
+                   arrange(Run, Bay)
+
+as.data.frame(control_summary)
+
+#Write replicates and controls with their biomarker data to files
+
+write_csv(hihg_reps, "output_files/hihg_reps_NPQ.csv")
+write_csv(sc_samples, "output_files/sc_reps_NPQ.csv")
+write_csv(nc_samples, "output_files/nc_reps_NPQ.csv")
+write_csv(ipc_samples, "output_files/ipc_reps_NPQ.csv")
+
+```
+ 
+### B.1.2 Samples with Bad Data
+Identify any samples with non-numeric entries, e.g., NA, NaN.
+
+**Bad Samples:**
+
+```{r bad-samples, message=FALSE, warning=FALSE, echo=TRUE}
+# THIS IS A NEW SECTION. CHANGED
+# Remove meta-data columns from numeric check
+biom_only <- combined_df[ , -c(1,2), drop = FALSE]
+
+# Identify rows with ONLY numeric values
+is_numeric_row <- apply(biom_only, 1, function(r) all(suppressWarnings(!is.na(as.numeric(r)))))
+bad_samples <- rownames(combined_df)[!is_numeric_row]
+bad_rows_df <- combined_df[bad_samples, , drop = FALSE]
+
+write_csv(bad_rows_df, "output_files/bad_samples.csv")
+
+combined_df <- combined_df[is_numeric_row, , drop = FALSE]
+
+print(bad_samples)
+
+```
+
+## B.2 Initial Summaries
+  
+### B.2.1 Non-replicate Sample Counts
+  
+```{r sample-counts, message=FALSE, warning=FALSE, echo=TRUE}
+# Remove Hihg Reps. SC, NC and IPC are removed above
+combined_df <- combined_df[!rownames(combined_df) %in% rep[[1]], ]
+
+# Summarize counts by Run × Bay
+nonrep_summary <- combined_df %>%
+  group_by(Run, Bay) %>%
+  summarise(NonRep_Samples = n(), .groups = "drop") %>%
+  arrange(Run, Bay)
+
+as.data.frame(nonrep_summary)
+```
+
+### B.2.2 Biomarker Distributions
+
+```{r biomarker-boxplots, echo=TRUE, fig.height=6, fig.width=12}
+# THIS WAS REMOVING TOO MANY COLUMNS. CHANGED
+combined_df[, -(1:2)] <- lapply(combined_df[, -(1:2)], function(x) suppressWarnings(as.numeric(x)))
+# Remove metadata columns
+biomarker_df <- combined_df[, sapply(combined_df, is.numeric), drop = FALSE]
+
+# Parameters for paneling
+panel_size <- 28  # number of biomarkers per panel
+n_biomarkers <- ncol(biomarker_df)
+n_panels <- ceiling(n_biomarkers / panel_size)
+
+# Loop through panels
+for (i in seq_len(n_panels)) {
+  start_col <- (i - 1) * panel_size + 1
+  end_col <- min(i * panel_size, n_biomarkers)
+  
+  panel_matrix <- biomarker_df[, start_col:end_col]
+  
+  # Set up plot layout (1 panel per figure)
+  par(mfrow = c(1,1), mar = c(8,4,4,2))  # adjust margins as needed
+  
+  boxplot(panel_matrix,
+          main = paste("Biomarkers", start_col, "to", end_col),
+          xlab = "Biomarker",
+          ylab = "NPQ Value",
+          las = 2,            # rotate x-axis labels
+          col = "lightblue")
+}
+```
+---
+
+# C. Prep QC Biomarker Set
+This is focused on generating the most stringent, high-quality biomarker dataset for QC (**QC Biomarker Set**).
+
+## C.1 Detectability Filtering
+
+### C.1.1 Low Detectability
+Keep only biomarkers with >98% detectability on every plate for the QC Dataset. Triage others for later inspection. Importantly, some with low detectability are not necessarily bad, e.g., APOE4 and others due to polymorphisms. They are just being temporarily removed to make a clean QC Biomarker Set.
+
+```{r detectability-filtering, message=FALSE, warning=FALSE, echo=TRUE}
+library(tidyverse)
+
+# Read detectability
+detect <- read_csv("input_files/biomarker_detectability.csv", show_col_types = FALSE)
+
+# Keep only the numeric plate columns and overall
+plate_cols <- names(detect)[-1]  # assume first column is Biomarker name
+
+# Determine low-detectability biomarkers
+low_det <- detect %>%
+  pivot_longer(cols = all_of(plate_cols), names_to = "Plate", values_to = "Detectability") %>%
+  group_by(Biomarker) %>%
+  summarize(
+    Min_Detectability = min(Detectability, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(Min_Detectability < min_detectability_qc)
+
+# Save removed biomarkers for record
+write_csv(low_det, "output_files/biomarkers_low_detectability.csv")
+
+# Print removed biomarkers
+knitr::kable(
+  low_det,
+  caption = "Biomarkers Removed Due to Low Detectability (min detectability <98%)"
+)
+
+# For QC, keep only high-detectability biomarkers
+biomarkers_keep <- setdiff(colnames(combined_df), low_det$Biomarker)
+
+combined_qc <- combined_df %>%
+  select(Run, Bay, all_of(biomarkers_keep))
+```
+
+### C.1.2 Low Raw Counts
+Keep only biomarkers with mean and median raw counts >500 on every plate for the QC Biomarker Set.  
+
+```{r raw-count filtering, message=FALSE, warning=FALSE, echo=TRUE}
+library(tidyverse)
+
+# Load raw counts
+raw_counts <- read_csv("input_files/Raw_counts.csv", show_col_types = FALSE)
+
+# Biomarkers as rownames
+raw_mat <- as.matrix(raw_counts[,-1])
+rownames(raw_mat) <- raw_counts[[1]]
+
+# Convert to samples x biomarkers to match combined_qc structure
+raw_t <- t(raw_mat)
+
+# Ensure matching sample sets between raw counts & metadata
+raw_df <- as.data.frame(raw_t)
+raw_df$SampleID <- rownames(raw_t)
+
+raw_df <- raw_df %>%
+  filter(SampleID %in% rownames(combined_qc)) %>%
+  left_join(meta_df, by = c("SampleID" = "SampleID")) %>%
+  select(SampleID, Run, Bay, everything())
+
+#Save for later parts of the pipeline
+write_csv(raw_df, "output_files/raw_df.csv")
+
+### Compute mean & median per Biomarker per Plate ####
+plate_stats <- raw_df %>%
+  pivot_longer(cols = -c(Run, Bay, SampleID),
+               names_to = "Biomarker",
+               values_to = "RawCount") %>%
+  group_by(Biomarker, Run, Bay) %>%
+  summarize(
+    mean_count = mean(RawCount, na.rm = TRUE),
+    median_count = median(RawCount, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+### Identify biomarkers failing thresholds ###
+low_counts <- plate_stats %>%
+  group_by(Biomarker) %>%
+  summarize(
+    Min_Mean = min(mean_count, na.rm = TRUE),
+    Min_Median = min(median_count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(Min_Mean < read_count_threshold | Min_Median < read_count_threshold)
+
+### Save for record
+write_csv(low_counts, "output_files/biomarkers_low_counts.csv")
+
+### Drop columns from QC set
+biomarkers_to_drop <- low_counts$Biomarker
+biomarkers_to_drop <- intersect(biomarkers_to_drop, colnames(combined_qc))
+biomarkers_to_drop <- setdiff(biomarkers_to_drop, c("Run", "Bay"))
+
+combined_qc <- combined_qc %>%
+  select(-all_of(biomarkers_to_drop))
+
+### Display formatted table in HTML report
+knitr::kable(
+  low_counts,
+  caption = "Biomarkers Removed Due to Low Raw Counts (<500 Min Mean or Min Median)"
+)
+
+```  
+
+## C.2 Correlation Filtering
+Create a set of biomarkers with low correlation for the QC Biomarker Set
+
+```{r correlation-filtering, message=FALSE, warning=FALSE, echo=TRUE}
+library(caret)
+
+# Keep only numeric biomarker columns
+num_cols <- sapply(combined_qc, is.numeric)
+samp_num <- combined_qc[, num_cols]
+
+# Compute correlation matrix
+cor_mat <- cor(samp_num, use = "pairwise.complete.obs")
+
+# Identify highly correlated pairs (|r| ≥ 0.4)
+high_cor <- findCorrelation(cor_mat, cutoff = corr_thresh, names = TRUE)
+
+# Independent biomarkers
+independent_biomarkers <- setdiff(colnames(samp_num), high_cor)
+
+# Heatmap of biomarker correlations
+library(pheatmap)
+pheatmap(cor_mat[independent_biomarkers, independent_biomarkers],
+         main = "Heatmap of Independent Biomarkers",
+         fontsize_row = 6, fontsize_col = 6)
+
+# Update QC dataset to independent biomarkers
+combined_qc <- combined_qc %>%
+  select(Run, Bay, all_of(independent_biomarkers))
+
+write.csv(independent_biomarkers,"output_files/QC_Biomarker_Set.csv")
+
+```
+---
+
+# D. Sample QC
+
+## D.1 Alamar Sample QC
+Gather the Alamar sample QC statistics and identify samples with "warning".
+
+```{r apply-droplist, message=FALSE, warning=FALSE, echo=TRUE}
+library(readr)
+library(dplyr)
+
+#alamar_qc is the Sample_QC file read in above
+
+warn_samps <- alamar_qc %>%
+  filter(`QC Status` == "warning") %>%
+  left_join(
+    meta_df %>% select(SampleID, Run, Bay),
+    by = c("Sample Name" = "SampleID")
+  )
+
+as.data.frame(warn_samps %>% select(`Sample Name`, Run, Bay, `IC Median`, Detectability, AUTO_WELLPOSITION), row.names=FALSE)
+
+write_csv(warn_samps, "output_files/Alamar_QC_warn.csv")
+
+```
+
+## D.2 Sample Outlier Detection 
+
+### D.2.1 PCA-Based Outlier Check
+Looking for single samples or small groups that are outliers on the first two PCs.
+Using a threshold of `r PCA_SD` sd to define outliers.
+
+```{r pca-outlier, message=FALSE, warning=FALSE, echo=TRUE}
+library(tidyverse)
+library(patchwork)
+library(dplyr)
+library(irlba)  # efficient PCA
+
+set.seed(123)
+
+# --- Round 1 PCA -----------------------------------------------------------
+biomarker_cols <- setdiff(names(combined_qc), c("Run", "Bay"))
+qc_matrix <- combined_qc[, biomarker_cols] %>% as.matrix()
+qc_scaled <- scale(qc_matrix)
+
+pca_res <- prcomp(qc_scaled, center = TRUE, scale. = TRUE)
+
+pca_df <- data.frame(
+  Sample = rownames(combined_qc),
+  Run = combined_qc$Run,
+  Bay = combined_qc$Bay,
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2]
+)
+
+# Identify outliers by distance
+
+pca_df <- pca_df %>%
+  group_by(Run, Bay) %>%
+  mutate(
+    PC_dist = sqrt(PC1^2 + PC2^2),
+    mean_PCdist = mean(PC_dist, na.rm = TRUE),
+    sd_PCdist   = sd(PC_dist, na.rm = TRUE),
+    extreme_outlier = PC_dist > (mean_PCdist + PCA_SD * sd_PCdist)
+  ) %>%
+  ungroup()
+
+extreme_samples_round1 <- pca_df$Sample[pca_df$extreme_outlier]
+write_csv(pca_df, "output_files/sample_pca_coordinates_round1.csv")
+
+# Variance explained
+var_explained <- summary(pca_res)$importance["Proportion of Variance", 1:2] * 100
+pc1_var <- round(var_explained[1], 1)
+pc2_var <- round(var_explained[2], 1)
+
+# Plot round 1
+plot1 <- ggplot(pca_df, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = Run, shape = Bay), size = 3, alpha = 0.7) +
+  geom_point(
+    data = filter(pca_df, extreme_outlier),
+    aes(x = PC1, y = PC2),
+    shape = 4, color = "black", size = 3, stroke = 0.5
+  ) +
+  labs(
+    title = paste0("PCA Round 1 (", length(extreme_samples_round1), " outliers)"),
+    x = paste0("PC1 (", pc1_var, "% variance)"),
+    y = paste0("PC2 (", pc2_var, "% variance)")
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+#Round 1 results
+print(plot1)
+knitr::kable(pca_df[pca_df$extreme_outlier, ], caption = "First-round PCA outliers:")
+
+# --- Round 2 PCA (remove round 1 outliers) ---------------------------------
+if (length(extreme_samples_round1) > 0) {
+  combined_qc_round2 <- combined_qc[!rownames(combined_qc) %in% extreme_samples_round1, ]
+
+  qc_matrix2 <- combined_qc_round2[, biomarker_cols] %>% as.matrix()
+  qc_scaled2 <- scale(qc_matrix2)
+
+  pca_res2 <- prcomp(qc_scaled2, center = TRUE, scale. = TRUE)
+
+  pca_df2 <- data.frame(
+    Sample = rownames(combined_qc_round2),
+    Run = combined_qc_round2$Run,
+    Bay = combined_qc_round2$Bay,
+    PC1 = pca_res2$x[, 1],
+    PC2 = pca_res2$x[, 2]
+  )
+    
+  pca_df2 <- pca_df2 %>%
+  group_by(Run, Bay) %>%
+  mutate(
+    PC_dist = sqrt(PC1^2 + PC2^2),
+    mean_PCdist = mean(PC_dist, na.rm = TRUE),
+    sd_PCdist   = sd(PC_dist, na.rm = TRUE),
+    extreme_outlier = PC_dist > (mean_PCdist + PCA_SD * sd_PCdist)
+  ) %>%
+  ungroup()
+
+
+  # Identify new outliers
+  extreme_samples_round2 <- pca_df2$Sample[pca_df2$extreme_outlier]
+  write_csv(pca_df2, "output_files/sample_pca_coordinates_round2.csv")
+
+  var_explained2 <- summary(pca_res2)$importance["Proportion of Variance", 1:2] * 100
+  pc1_var2 <- round(var_explained2[1], 1)
+  pc2_var2 <- round(var_explained2[2], 1)
+
+  # Plot round 2
+  plot2 <- ggplot(pca_df2, aes(x = PC1, y = PC2)) +
+    geom_point(aes(color = Run, shape = Bay), size = 3, alpha = 0.7) +
+    geom_point(
+      data = filter(pca_df2, extreme_outlier),
+      aes(x = PC1, y = PC2),
+      shape = 4, color = "black", size = 3, stroke = 0.5
+    ) +
+    labs(
+      title = paste0("PCA Round 2 (", length(extreme_samples_round2), " new outliers)"),
+      x = paste0("PC1 (", pc1_var2, "% variance)"),
+      y = paste0("PC2 (", pc2_var2, "% variance)")
+    ) +
+    theme_minimal() +
+    theme(legend.position = "right")
+
+  # Round 2
+  print(plot2)
+  knitr::kable(pca_df2[pca_df2$extreme_outlier, ], caption = "Second-round PCA outliers:")
+
+} else {
+  cat("\nNo first-round PCA outliers detected. Skipping second round.\n")
+  plot1
+}
+```
+
+I changed these to be plate-specific outliers.
+
+### D.2.2 Sample Outlier Burden
+Here we are identifying samples that have extreme outliers over biomarkers within their plate.
+Compute p-value for whether outlier burden in a sample is more than expected by chance. 
+
+```{r excessive_outliers, message=FALSE, warning=FALSE, echo=TRUE}
+library(dplyr)
+library(poibin)  # for Poisson-Binomial p-values
+
+#Uses IQR method to define outliers
+upper_matrix <- matrix(0, nrow = nrow(qc_matrix), ncol = ncol(qc_matrix),
+                       dimnames = dimnames(qc_matrix))
+lower_matrix <- upper_matrix * 0
+
+for (rb in unique(paste(combined_qc$Run, combined_qc$Bay, sep = "_"))) {
+  idx <- which(paste(combined_qc$Run, combined_qc$Bay, sep = "_") == rb)
+  submat <- qc_matrix[idx, , drop = FALSE]
+
+  # Compute Q1 and Q3 per biomarker
+  Q1 <- apply(submat, 2, quantile, 0.25, na.rm = TRUE)
+  Q3 <- apply(submat, 2, quantile, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  
+  # Define outliers
+  upper <- sweep(submat, 2, Q3 + samp_out_thresh * IQR, ">")
+  lower <- sweep(submat, 2, Q1 - samp_out_thresh * IQR, "<")
+
+  upper_matrix[idx, ] <- upper_matrix[idx, ] + upper
+  lower_matrix[idx, ] <- lower_matrix[idx, ] + lower
+}
+
+# Assume upper_matrix and lower_matrix are data.frames with samples in rows, biomarkers in columns and that combined_qc has Run and Bay columns
+
+add_outlier_stats <- function(out_mat, combined_df) {
+  out_mat <- as.matrix(out_mat)
+  
+  out_df <- as.data.frame(out_mat) %>%
+    mutate(
+      SampleID = rownames(out_mat),
+      Run = combined_df$Run,
+      Bay = combined_df$Bay
+    )
+
+  p_biom <- colMeans(out_mat, na.rm = TRUE)
+
+  out_df <- out_df %>%
+    rowwise() %>%
+    mutate(
+      Total_Outliers = sum(c_across(where(is.numeric)), na.rm = TRUE),
+      Expected_Outliers = sum(p_biom, na.rm = TRUE),
+      P_Value = 1 - poibin::ppoibin(Total_Outliers - 1, p_biom)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      FDR = p.adjust(P_Value, method = "BH")  # ← NEW COLUMN
+    ) %>%
+    select(SampleID, Run, Bay, Total_Outliers, Expected_Outliers,
+           P_Value, FDR, everything())
+
+  return(out_df)
+}
+
+upper_df <- add_outlier_stats(upper_matrix, combined_qc)
+lower_df <- add_outlier_stats(lower_matrix, combined_qc)
+
+# Save to CSV
+write_csv(upper_df, "output_files/upper_outliers_with_stats.csv")
+write_csv(lower_df, "output_files/lower_outliers_with_stats.csv")
+
+# ---- Sample Outlier Summary (Top 10) ----
+
+# Sort by significance (lowest P-value first)
+upper_sorted <- upper_df %>% arrange(P_Value)
+lower_sorted <- lower_df %>% arrange(P_Value)
+
+# Save full sorted tables
+write_csv(upper_sorted, "output_files/upper_outliers_sorted.csv")
+write_csv(lower_sorted, "output_files/lower_outliers_sorted.csv")
+
+# Select first 10 + only key columns for report
+upper_top10 <- upper_sorted %>%
+  select(SampleID, Run, Bay, "Total Out"=Total_Outliers, "Exp Out" = Expected_Outliers, 
+         P_Value, FDR) %>%
+  slice(1:10)
+
+lower_top10 <- lower_sorted %>%
+  select(SampleID, Run, Bay, "Total Out"=Total_Outliers, "Exp Out" = Expected_Outliers,
+         P_Value, FDR) %>%
+  slice(1:10)
+
+# Print to RMarkdown
+knitr::kable(upper_top10, caption = "Top 10 Upper Outliers (Sorted by P-value)")
+
+knitr::kable(lower_top10, caption = "Top 10 Lower Outliers (Sorted by P-value)")
+```
+
+These plots show where the outlier samples fall for the biomarkers. Red are outliers. Blue are points for the same sample where they are not outliers. Only showing plots for samples with FDR< `r FDR_threshold`.
+ 
+```{r visualize_excessive_outliers, message=FALSE, warning=FALSE, echo=TRUE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+
+upper_sig <- upper_df$SampleID[upper_df$FDR < FDR_threshold]
+lower_sig <- lower_df$SampleID[lower_df$FDR < FDR_threshold]
+
+# List of extreme outlier SampleIDs 
+extreme_samples <- c(upper_sig,lower_sig)
+
+plot_list <- list()
+
+plot_sample_violin <- function(sample_id) {
+  
+  # Get Run/Bay for title
+  sample_run <- combined_qc[sample_id, "Run"]
+  sample_bay <- combined_qc[sample_id, "Bay"]
+  
+  # Convert to long format
+  long_df <- combined_qc %>%
+    rownames_to_column("SampleID") %>%
+    pivot_longer(
+      cols = -c(SampleID, Run, Bay),
+      names_to = "Biomarker",
+      values_to = "Value"
+    )
+  
+  # Create Highlight column: default "Other"
+  long_df$Highlight <- "Other"
+  
+  # Pull the outlier flags for this sample
+  outlier_flags <- upper_matrix[sample_id,]+lower_matrix[sample_id,]
+  
+  # Only update the Highlight for this sample
+  long_df$Highlight[long_df$SampleID == sample_id] <- ifelse(
+    outlier_flags[long_df$Biomarker[long_df$SampleID == sample_id]],
+    "Extreme",
+    "Normal"
+  )
+  
+  # Plot
+  p <- ggplot(long_df, aes(x = Biomarker, y = Value)) +
+    geom_violin(fill = "gray70", alpha = 0.6, trim = FALSE) +
+    geom_point(
+      data = subset(long_df, Highlight != "Other"),
+      aes(color = Highlight),
+      size = 3
+    ) +
+    scale_color_manual(values = c("Extreme" = "red", "Normal" = "blue")) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none") +
+    labs(title = paste("Sample", sample_id,
+                       "| Run:", sample_run, "| Bay:", sample_bay),
+         x = "Biomarker",
+         y = "NPQ")
+  
+  return(p)
+}
+
+# Loop through extreme samples
+for (sample_id in extreme_samples) {
+  p=plot_sample_violin(sample_id)
+  print(p)
+}
+```
+
+Determine samples with a significant number of outliers over biomarkers.
+
+### D.2.3 IC-Outlier Reads
+Here we are identifying samples that have extreme numbers of matching reads in aggregate within their plate.
+
+Alamar does this with respect to the median number of reads in the IC samples within a plate: Sample IC reads relative to the median (Within +/-40% of the plate median). The IC is mCherry.
+They also WARN if Sample IC reads <1000. Usually the outlier criteria would capture this, but it would not tell us if the whole plate had low reads. I added that as a conditional lower bound. 
+
+```{r Sample_vs_IC_reads, message=FALSE, warning=FALSE, echo=TRUE}
+#Look at mCherry raw reads over Run and Bay
+
+#raw_df has the raw count data (including mCherry) for all of the samples in QC
+# Ensure Run and Bay are factors
+raw_df$Run <- factor(raw_df$Run)
+raw_df$Bay <- factor(raw_df$Bay)
+
+# Custom Bay colors
+bay_colors <- c("Bay1" = "red", "Bay2" = "green", "Bay3" = "blue")
+
+biom <- "mCherry"
+
+# Compute per-Run/Bay medians and flag outliers
+# Lower bound is -40% of the median or 1000, whichever is bigger
+df_temp <- raw_df %>%
+  select(SampleID = 1, Value = all_of(biom), Run, Bay) %>%
+  group_by(Run, Bay) %>%
+  mutate(
+    Median_Value = median(Value, na.rm = TRUE),
+    Lower_Thresh = pmax((Median_Value * 0.6), 1000),
+    Upper_Thresh = Median_Value * 1.4,  # +40%
+    Outlier_Flag = ifelse(Value < Lower_Thresh | Value > Upper_Thresh, TRUE, FALSE)
+  ) %>%
+  ungroup()
+
+# Plot
+#I tried to highlight outliers on plot but I couldn't get them centered right
+p <- ggplot(df_temp, aes(x = Run, y = Value, fill = Bay)) +
+  geom_violin(alpha = 0.5, trim = FALSE, position = position_dodge(width = 0.8)) +
+  geom_jitter(aes(color = Bay),
+              position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+              alpha = 0.75, size = 1.3) +
+  scale_fill_manual(values = bay_colors) +
+  scale_color_manual(values = bay_colors) +
+  theme_minimal() +
+  labs(
+    title = "Run × Bay Effects: IC Reads",
+    x = "Run",
+    y = "Reads"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p)
+
+df_temp <- df_temp %>%
+  rename(IC_Reads = Value)
+
+# Print table
+knitr::kable(
+  df_temp %>% 
+    filter(Outlier_Flag == TRUE) %>%
+    select(SampleID, Run, Bay, IC_Reads) %>%
+    arrange(desc(IC_Reads)),
+  caption = "mCherry-Read Outliers (Sorted by Reads)"
+)
+
+IC_outlier_samples= df_temp %>% 
+    filter(Outlier_Flag ==TRUE)%>%
+    arrange(desc(IC_Reads)) %>%
+    select(SampleID)
+  
+```
+Note: As expected, the samples with very high reads for mCherry, have lower average NPQ than others.
+
+### D.2.4 Extreme Matching Reads
+Here we are identifying samples that have extreme numbers of total matching reads, in aggregate, within their plate. These are **flagged** samples. For the lower bound, we use a minimum count of 500,000 if the IQR bound is smaller.
+
+```{r excessive_matching_reads, message=FALSE, warning=FALSE, echo=TRUE}
+# ---- Matching-Reads QC ----
+library(dplyr)
+library(ggplot2)
+library(readr)
+
+
+# Merge matching reads info
+matching_df <- alamar_qc %>%
+  select(SampleID = `Sample Name`, Reads) %>%          # rename + keep Reads
+  filter(SampleID %in% rownames(combined_qc)) %>%      # keep only samples in combined_qc
+  left_join(                                           
+    combined_qc %>%                                     # pull Run + Bay from combined_qc
+      rownames_to_column("SampleID") %>%
+      select(SampleID, Run, Bay),
+    by = "SampleID"
+  )
+
+# ---- Outlier detection by Run × Bay ----
+#IQR MAY NOT CAPTURE LOWER READ OUTLIERS. USE ALAMAR LOWER BOUND OF 500,000 if the IQR bound is too low.
+#This changed from 11/06 version
+# Compute per-Run/Bay medians and flag outliers
+
+matching_outliers <- matching_df %>%
+  group_by(Run, Bay) %>%
+  mutate(
+    Median = median(Reads, na.rm = TRUE),
+    Q1     = quantile(Reads, 0.25, na.rm = TRUE),
+    Q3     = quantile(Reads, 0.75, na.rm = TRUE),
+    IQR    = Q3 - Q1,
+    Lower_Bound = pmax(500000, Median - read_out_thresh * IQR),
+    Upper_Bound = Median + read_out_thresh * IQR,
+    Matching_Outlier = Reads < Lower_Bound | Reads > Upper_Bound
+  ) %>%
+  ungroup()
+
+# Convert factor levels (ensure ordered)
+matching_outliers$Run <- factor(matching_outliers$Run)
+matching_outliers$Bay <- factor(matching_outliers$Bay, levels = c("Bay1", "Bay2", "Bay3"))
+
+# Assign Bay colors
+bay_colors <- c("Bay1" = "red", "Bay2" = "green", "Bay3" = "blue")
+#bay_shapes <- c("Bay1" = 16, "Bay2" = 17, "Bay3" = 15)  # optional: circle, triangle, square
+
+p <- ggplot(matching_outliers, aes(x = Run, y = Reads, fill = Bay)) +
+  geom_violin(alpha = 0.5, trim = FALSE, position = position_dodge(width = 0.8)) +
+  geom_jitter(aes(color = Bay),
+              position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+              alpha = 0.75, size = 1.3) +
+  scale_fill_manual(values = bay_colors) +
+  scale_color_manual(values = bay_colors) +
+  theme_minimal() +
+  labs(
+    title = "Run × Bay Effects: Total Reads",
+    x = "Run",
+    y = "Reads"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p)
+
+read_outliers <- matching_outliers %>%
+    filter(Matching_Outlier == TRUE) %>%
+    arrange(desc(Reads)) %>%
+    select(SampleID, Run, Bay, Lower_Bound, Upper_Bound, Reads)
+
+# Print table
+knitr::kable(
+  read_outliers, 
+  caption = "Matching-Read Outliers (Sorted by Reads)"
+)
+
+# Save to CSV
+write_csv(
+  read_outliers %>%
+    arrange(Run, Bay, desc(Reads)),
+  "output_files/flagged_read_outliers.csv"
+)
+
+# read_outliers are our flagged samples
+
+```
+
+## D.3 Sample Traige
+Here we are identifying samples to be triaged based on our sample QC and comparing them to the Alamar QC.
+
+```{r sample_triage, message=FALSE, warning=FALSE, echo=TRUE}
+# --- Triage samples for removal ---
+
+# Bad Samples
+
+# Identify PCA extreme outliers
+pca_outliers <- c(pca_df$Sample[pca_df$extreme_outlier],pca_df2$Sample[pca_df2$extreme_outlier])
+
+# Identify samples with significant outlier burden
+# Combine upper and lower matrices for total FDR per sample
+upper_sig <- upper_df$SampleID[upper_df$FDR < FDR_threshold]
+lower_sig <- lower_df$SampleID[lower_df$FDR < FDR_threshold]
+outlier_burden_samples <- unique(c(upper_sig, lower_sig))
+
+triage_df <- bind_rows(
+  tibble(SampleID = as.character(unlist(pca_outliers)), Reason = "PCA outlier"),
+  tibble(SampleID = as.character(unlist(outlier_burden_samples)), Reason = "High outlier burden (FDR)"),
+  tibble(SampleID = as.character(unlist(IC_outlier_samples)), Reason = "IC outlier"),
+  tibble(SampleID = as.character(unlist(bad_samples)), Reason = "Bad Data"),
+)
+
+# If a sample appears in multiple categories, collapse reasons
+triage_df <- triage_df %>%
+  group_by(SampleID) %>%
+  summarize(Reason = paste(unique(Reason), collapse = "; "), .groups = "drop")
+
+triage_df$AlamarWarning <- triage_df$SampleID  %in% warn_samps$`Sample Name`
+# Print to RMarkdown
+knitr::kable(
+  triage_df, 
+  caption = "TRIAGED SAMPLES"
+)
+
+warn_samps$Triage <- warn_samps$`Sample Name` %in% triage_df$SampleID
+knitr::kable(
+  warn_samps %>% select(`Sample Name`, `IC Median`, Detectability, `QC Status`,Triage), 
+  caption = "ALAMAR WARN SAMPLES"
+)
+
+#Flagged excessive_matching_reads (not removed)
+read_outliers$Triage <- read_outliers$SampleID %in% triage_df$SampleID
+knitr::kable(
+  read_outliers %>% select(SampleID, Run, Bay, Reads, Triage), 
+  caption = "FLAGGED SAMPLES"
+)
+  
+# Save to CSV
+write_csv(triage_df, "output_files/samples_to_triage.csv")
+
+# Remove triaged samples from main dataset
+combined_qc_filtered <- combined_qc %>%
+  rownames_to_column("SampleID") %>%
+  filter(!SampleID %in% triage_df$SampleID) %>%
+  column_to_rownames("SampleID")
+
+#Add count summary
+qc_summary <- combined_qc_filtered %>%
+  group_by(Run, Bay) %>%
+  summarise(combined_qc_filtered = n(), .groups = "drop") %>%
+  arrange(Run, Bay)
+
+knitr::kable(
+  qc_summary, 
+  caption = "Summary of post-QC counts:"
+)
+
+```
+
+# E. Biomarker QC
+Reintegrate biomarkers and separate into groups.
+
+## E.1 Re-integrate High-Corr Biomarkers 
+Here we add back in high-correlation biomarkers that were removed for the QC Biomarker Set. These all should have good detectability and raw read counts.
+
+```{r add_high_cor, message=FALSE, warning=FALSE, echo=TRUE}
+# Add back high-correlated biomarkers to combined_qc_filtered
+library(tibble)
+
+# Ensure only rows in combined_qc_filtered are selected
+high_cor_subset <- combined_df[rownames(combined_qc_filtered), high_cor, drop = FALSE]
+
+# Add these columns to combined_qc_filtered
+combined_qc_full <- cbind(combined_qc_filtered, high_cor_subset)
+# Move SampleIDs to first column
+combined_qc_full <- rownames_to_column(combined_qc_full, var = "SampleID")
+
+knitr::kable(
+  high_cor, 
+  caption = "High-correlation biomarkers added back:"
+)
+dim(combined_qc_full)[2]-3 #NUMBER OF BIOMARKERS IS COLUMNS-3
+```
+
+## E.2 Low-detectability Biomarkers
+
+### E.2.1 Re-integrate Det>50% Biomarkers 
+Alamar suggests that the detectability threshold should be 50%. Here we add back in Biomarkers with minimum detectability>50% that were dropped to create the QC Biomarker set. We also require these to have raw read counts above the threshold. Those with low counts are further examined in later QC steps.
+
+```{r add_med_det, message=FALSE, warning=FALSE, echo=TRUE}
+# Add back biomarkers with >50% Min_Detectability ("medium detectability")
+med_det <- low_det[low_det$Min_Detectability > min_detectability, ]
+
+# Split into "good" and "still low count"
+good_detect <- med_det[!(med_det$Biomarker %in% low_counts$Biomarker), ]
+med_det_low_counts <- med_det[(med_det$Biomarker %in% low_counts$Biomarker), ]
+
+# Extract good biomarker names
+good_detect_names <- good_detect$Biomarker
+
+# Subset combined_df to keep only good samples and these biomarkers
+med_det_subset <- combined_df[rownames(combined_qc_filtered), good_detect_names, drop = FALSE]
+
+# Add these columns back to the filtered QC dataset
+combined_qc_full <- cbind(combined_qc_full, med_det_subset)
+rownames(combined_qc_full) <- NULL
+
+# Confirm dimensions
+dim(combined_qc_full)[2]-3 #NUMBER OF BIOMARKERS IS COLUMNS-3
+
+# Detectability metadata tables for each group
+med_detect_table <- detect[detect$Biomarker %in% good_detect_names, ]
+med_det_low_counts_table <- detect[detect$Biomarker %in% med_det_low_counts$Biomarker, ]
+
+# View tables
+knitr::kable(
+  med_detect_table, 
+  caption = "Medium-detectability (min det>50%) biomarkers added back:"
+)
+knitr::kable(
+  med_det_low_counts_table, 
+  caption = "Medium-detectability biomarkers with low counts to be examined below:"
+)
+
+```
+
+### E.2.2 Re-examine Det<50% Biomarkers 
+Look at these for possible re-integration, e.g., those with some expected low detectability.
+
+```{r check_low_det, message=FALSE, warning=FALSE, echo=TRUE}
+# Check biomarkers with <50% Min_Detectability to see if any should be added back in
+library(kableExtra)
+
+low_low_det <- low_det[low_det$Min_Detectability <= min_detectability, ]
+
+# Split into "low detctability" and "low detectabiloty with low count"
+low_detect <- low_low_det[!(low_low_det$Biomarker %in% low_counts$Biomarker), ]
+low_det_low_counts <- low_low_det[(low_low_det$Biomarker %in% low_counts$Biomarker), ]
+
+# Extract good biomarker names
+low_detect_names <- low_detect$Biomarker
+
+# Detectability metadata tables for each group
+low_detect_table <- detect[detect$Biomarker %in% low_detect_names, ]
+low_det_low_counts_table <- detect[detect$Biomarker %in% low_det_low_counts$Biomarker, ]
+
+# View tables
+knitr::kable(
+  low_detect_table, 
+  caption = "Low-detectability (min det>50%) biomarkers added back:"
+)
+knitr::kable(
+  low_det_low_counts_table, 
+  caption = "Low-detectability biomarkers with low counts to be examined below:"
+)
+
+# Look for bimodal distributions and extreme outliers. Note differences across plates. Also LOD for these. 
+
+#Pull LODs
+# Read annotation data
+annot <- read_csv("input_files/Annotation_Targets.csv")
+
+# Select required columns
+annot_sel <- annot %>%
+  select(targetName, targetDetectability, targetLOD, targetLOD_NPQ, plateID)
+
+ # Extract Run and Bay from plateID (assuming "YYYYMMDD_BayX" or similar format)
+#CHANGED THIS FOR ALZ2 TO Allow for Runs with same prefix but different plates
+annot_sel <- annot_sel %>%
+  mutate(Run = str_extract(plateID, "\\d{8}-\\d+"),
+         Bay = str_extract(plateID, "Bay\\d+"),
+         RunBay = paste0(Run, "_", Bay))
+
+# Make wide format table: LOD per Run/Bay
+lod_matrix <- annot_sel %>%
+  select(targetName, RunBay, targetLOD_NPQ) %>%
+  distinct() %>%   # remove any duplicates
+  pivot_wider(names_from = RunBay,
+              values_from = targetLOD_NPQ)
+
+# LOD for Reads
+lod_reads_matrix <- annot_sel %>%
+  select(targetName, RunBay, targetLOD) %>%
+  distinct() %>%   # remove any duplicates
+  pivot_wider(names_from = RunBay,
+              values_from = targetLOD)
+
+# Extract non-targetName columns
+cols <- colnames(lod_matrix)[-1]
+
+# Extract run date + bay index as ordering helpers
+run_date <- str_extract(cols, "\\d{8}")
+bay_num <- str_extract(cols, "(?<=Bay)\\d+") |> as.numeric()
+
+# Create order index based on date then Bay number
+col_order <- order(run_date, bay_num)
+
+# Apply reordering: keep targetName first
+lod_matrix <- lod_matrix %>%
+  select(targetName, all_of(cols[col_order]))
+
+# Reorder lod_reads_matrix columns to exactly match lod_matrix
+lod_reads_matrix <- lod_reads_matrix %>%
+  select(all_of(colnames(lod_matrix)))
+
+write.csv(lod_matrix,"output_files/lod_matrix.csv", row.names = TRUE)
+write.csv(lod_reads_matrix,"output_files/lod_reads_matrix.csv", row.names = TRUE)
+
+cat("Plots of Low-detectability (min det<50%) biomarkers with good read counts:\n")
+# Keep only rows in combined_qc_filtered and select relevant columns
+combined_low_det <- combined_df %>%
+  filter(rownames(.) %in% rownames(combined_qc_filtered)) %>%
+  rownames_to_column("SampleID") %>%
+  select(
+    SampleID,
+    Run,
+    Bay,
+    all_of(low_detect_names)
+  )
+
+# Ensure Run and Bay are factors
+combined_low_det$Run <- factor(combined_low_det$Run)
+combined_low_det$Bay <- factor(combined_low_det$Bay)
+
+# Custom Bay colors
+bay_colors <- c("Bay1" = "red", "Bay2" = "green", "Bay3" = "blue")
+
+# Identify only biomarker columns
+biomarker_cols <- setdiff(names(combined_low_det), c("SampleID", "Run", "Bay"))
+
+# Loop and create violin plots for each biomarker
+for (biom in biomarker_cols) {
+  
+  df_temp <- combined_low_det %>%
+    select(Value = all_of(biom), Run, Bay)
+  
+  p <- ggplot(df_temp, aes(x = Run, y = Value, fill = Bay)) +
+    geom_violin(alpha = 0.5, trim = FALSE, position = position_dodge(width = 0.8)) +
+    geom_jitter(aes(color = Bay), 
+                position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+                alpha = 0.75, size = 1.3) +
+    scale_fill_manual(values = bay_colors) +
+    scale_color_manual(values = bay_colors) +
+    theme_minimal() +
+    labs(
+      title = paste("Run × Bay Effects:", biom),
+      x = "Run",
+      y = biom
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  print(p)
+
+ # ----- Print per-biomarker LOD table -----
+lod_npq_vals <- lod_matrix[lod_matrix$targetName == biom, -1, drop = FALSE]
+lod_read_vals <- lod_reads_matrix[lod_reads_matrix$targetName == biom, -1, drop = FALSE]
+
+lod_table <- rbind(
+  "NPQ LOD" = lod_npq_vals,
+  "Read LOD" = lod_read_vals
+)
+
+# Print LOD table
+print(cbind(rownames(lod_table),lod_table)) # I tried to make this prettier but it doesn't work in a loop
+}
+
+```
+
+
+## E.3 Low Raw-Count Biomarkers  
+Look at these more closely in secondary QC. Many are expected, because the protein is rare or they are due to a polymorphism, e.g., APOE4, BD-MAPT.
+
+I'm showing NPQ values here for consistency, not raw read counts. Read counts will be examined further in secondary QC.
+```{r check_low_raw_counts, message=FALSE, warning=FALSE, echo=TRUE}
+# Examine low-count biomarkers 
+
+# Vector of low-count biomarker names
+low_counts_vec <- low_counts[[1]]  # assuming low_counts is a data frame with one column
+
+# Keep only rows in combined_qc_filtered and select relevant columns
+combined_low_counts <- combined_df %>%
+  filter(rownames(.) %in% rownames(combined_qc_filtered)) %>%
+  rownames_to_column("SampleID") %>%
+  select(
+    SampleID,
+    Run,
+    Bay,
+    all_of(low_counts_vec)
+  )
+
+# Ensure Run and Bay are factors
+combined_low_counts$Run <- factor(combined_low_counts$Run)
+combined_low_counts$Bay <- factor(combined_low_counts$Bay)
+
+# Custom Bay colors
+bay_colors <- c("Bay1" = "red", "Bay2" = "green", "Bay3" = "blue")
+
+# Identify only biomarker columns
+biomarker_cols <- setdiff(names(combined_low_counts), c("SampleID", "Run", "Bay"))
+
+# Loop and create violin plots for each biomarker
+for (biom in biomarker_cols) {
+  
+  df_temp <- combined_low_counts %>%
+    select(Value = all_of(biom), Run, Bay)
+  
+  p <- ggplot(df_temp, aes(x = Run, y = Value, fill = Bay)) +
+     geom_violin(alpha = 0.5, trim = FALSE, position = position_dodge(width = 0.8)) +
+     geom_jitter(aes(color = Bay), 
+                position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+                alpha = 0.75, size = 1.5) +
+    scale_fill_manual(values = bay_colors) +
+    scale_color_manual(values = bay_colors) +
+    theme_minimal() +
+    labs(
+      title = paste("Run × Bay Effects:", biom),
+      x = "Run",
+      y = biom
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  print(p)
+  # Print the row from combined_low_counts corresponding to this biomarker
+  print(knitr::kable(low_counts[low_counts$Biomarker == biom, , drop = FALSE],caption = "Reads"))
+}
+
+```
+
+# F. Prepare Output  
+Output the QC'd dataset with samples from "Sample QC" removed. All biomarkers are included, but separated into two files: 1) NPQxxx_post_QC.csv and 2) NPQxxx_Low_post_QC.csv. 
+
+1) Contains all biomarkers with minimum detectability >50% across plates for QC'd samples that have mean and median raw-read counts>500 across all plates.
+
+2) Contains all biomarkers with minimum detectability <= 50% across plates and/or mean or median raw-read counts <= 500 across all plates or QC'd samples.
+
+3) Contains all biomarkers in 1 for triaged samples.
+
+4) Contains all biomarkers in 2 for triaged samples. 
+
+Low detectability and low count biomarkers are in a separate dataset for "analysis". They are not necessarily bad, but will need to be analyzed differently from continuous biomarkers.
+
+```{r make_output, message=FALSE, warning=FALSE, echo=TRUE}
+# Here we save the QC'd files
+# We may want to transpose them to be like original NPQ
+library(dplyr)
+library(tibble)
+
+knitr::kable(
+  summarize_counts(combined_qc_full, "QC'd Samples"), 
+  caption = "POST-QC SAMPLES"
+)
+
+#Output file 1
+
+cat("QC'd Biomarkers:", dim(combined_qc_full)[2]-3, "\n")
+qc_file <- file.path("output_files", sub("\\.csv$", "_post_QC.csv", NPQ_data))
+write.csv(combined_qc_full, qc_file, row.names = TRUE)
+cat("Saved:", qc_file, "\n")
+
+#Output file 2
+
+# Remove duplicated metadata columns from the second dataset
+combined_low_counts_nometadata <- combined_low_counts %>%
+  select(-Run, -Bay)
+# Perform the join on SampleID
+combined_qc_low <- combined_low_det %>%
+  left_join(combined_low_counts_nometadata, by = "SampleID")
+
+cat("QC'd Low-count/Low-detectability Biomarkers:", dim(combined_qc_low)[2]-3, "\n")
+qc_file <- file.path("output_files", sub("\\.csv$", "_Low_post_QC.csv", NPQ_data))
+write.csv(combined_qc_low, qc_file, row.names = FALSE)
+cat("Saved:", qc_file, "\n")
+
+# Output file 3: TRIAGE × Full QC biomarkers
+
+# sample list
+triage_samples <- triage_df$SampleID
+combined_df <- rownames_to_column(combined_df, "SampleID")
+
+triage_qc_full <- combined_df %>%
+  filter(SampleID %in% triage_samples) %>%
+  select(any_of(colnames(combined_qc_full)))
+
+triage_full_file <- file.path(
+  "output_files", 
+  sub("\\.csv$", "_post_QC_triage.csv", NPQ_data)
+)
+
+write.csv(triage_qc_full, triage_full_file, row.names = FALSE)
+cat("Saved TRIAGE full-QC biomarker file:", triage_full_file, "\n")
+
+# Output file 4: TRIAGE × Low QC biomarkers
+
+triage_qc_low <- combined_df %>%
+  filter(SampleID %in% triage_samples)%>%
+  select(any_of(colnames(combined_qc_low)))
+
+triage_low_file <- file.path(
+  "output_files", 
+  sub("\\.csv$", "_Low_post_QC_triage.csv", NPQ_data)
+)
+
+write.csv(triage_qc_low, triage_low_file, row.names = FALSE)
+cat("Saved TRIAGE low-QC biomarker file:", triage_low_file, "\n")
+
+```
+
+# G.  Notes
+
+Combined Data:

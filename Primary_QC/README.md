@@ -11,9 +11,9 @@ Primary quality control analyses for Alamar biomarker data. This pipeline proces
 
 ## Scripts
 
-### QC_Pipeline_Primary_ALZ123_12_20_25.Rmd
+### QC_Pipeline_Primary_Alamar.Rmd
 
-Main QC pipeline for the combined ALZ1, ALZ2, and ALZ3 datasets.
+Main QC pipeline for Alamar fluid biomarker data.
 
 **Purpose:** Performs comprehensive quality control including:
 - Sample and biomarker filtering based on read counts and detectability
@@ -23,11 +23,17 @@ Main QC pipeline for the combined ALZ1, ALZ2, and ALZ3 datasets.
 - NPQ data normalization and export
 
 **Key Parameters:**
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `read_threshold` | 300 | Minimum read count for sample inclusion |
-| `detect_threshold` | 0.8 | Minimum detectability rate for biomarkers |
-| `lod_method` | "half" | Method for handling values below LOD |
+| `PCA_SD` | 5 | Number of SDs from mean to define PCA outliers |
+| `min_detectability` | 50 | Minimum detectability (%) to retain biomarker in post-QC dataset |
+| `min_detectability_qc` | 98 | Minimum detectability (%) to retain biomarker in QC Biomarker dataset |
+| `read_count_threshold` | 500 | Minimum mean/median raw reads per sample for QC |
+| `corr_thresh` | 0.4 | Maximum correlation coefficient allowed between biomarkers in QC Biomarker dataset |
+| `samp_out_thresh` | 1.5 | Multiplier for IQR to determine if a sample if an outlier from the median NPQ for a biomarker|
+| `read_out_thresh` | 4 | Multiplier for IQR to determine if a sample if an outlier from the median for Total Reads|
+| `FDR_threshold` | 0.01 | Significance threshold for outlier burden |
 
 **Required Input Files:**
 - Raw NPQ data files (CSV format) from Alamar platform
@@ -42,15 +48,16 @@ Main QC pipeline for the combined ALZ1, ALZ2, and ALZ3 datasets.
 ## Input Files
 
 Place your input data in `input_files/` (not tracked in git):
-- Raw NPQ data from Alamar runs
-- Plate layout files
-- Sample manifests
+- Raw NPQ data and raw count data from Alamar runs
+- Biomarker annotation and detectability data
+- Alamar Sample QC
+- List of any non-Alamar technical controls
 
 ## Output Files
 
 Generated outputs are saved to `output_files/` (not tracked in git):
 - Filtered NPQ datasets
-- QC summary tables
+- QC summary files
 - Diagnostic plots
 
 ## Dependencies
