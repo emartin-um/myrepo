@@ -22,9 +22,9 @@ Look at CVs within plates, within Runs and overall
 
 ## A.1 Input Data
 
-Input files are auto-detected from `input_files/`. If no NPQ file is found, the pipeline will attempt to copy from `Primary_QC/output_files/`.
+Input files are auto-detected from `input_files/`. If no files are found, the pipeline will attempt to copy from `Primary_QC/input_files/` (the raw data files, not the processed outputs).
 
-**Required Input Data Files:** Place all files in a folder called `input_files` in the working directory (or let the pipeline copy them from Primary_QC).
+**Required Input Data Files:** Place all files in a folder called `input_files` in the working directory (or let the pipeline copy them from Primary_QC/input_files).
 
 1. **Biomarker NPQ data** (`NPQ_xxxxxxxx.csv`) – Rows: biomarkers; Columns: samples; downloaded from NAS. Assign the filename to the variable `NPQ_data` below.
 2. **Raw count data** (`Raw_counts.csv`) – Rows: biomarkers; Columns: samples; exported from NPQ_Values.xlsx.
@@ -58,18 +58,18 @@ library(tidyverse)
 if (!dir.exists("input_files")) dir.create("input_files")
 if (!dir.exists("output_files")) dir.create("output_files")
 
-# Check if input files exist, if not copy from Primary_QC
-primary_qc_dir <- "../Primary_QC/output_files"
+# Check if input files exist, if not copy from Primary_QC/input_files
+# Note: Replicate_Analysis uses the RAW NPQ file (biomarkers as rows, samples as columns)
+#       NOT the processed post-QC file from Primary_QC/output_files
+primary_qc_input_dir <- "../Primary_QC/input_files"
 
 # --- NPQ file ---
 # Look for NPQ file in input_files (any file starting with NPQ and ending in .csv)
 npq_files <- list.files("input_files", pattern = "^NPQ.*\\.csv$", full.names = TRUE)
 
-if (length(npq_files) == 0 && dir.exists(primary_qc_dir)) {
-  # No NPQ file found - try to copy from Primary_QC
-  primary_npq <- list.files(primary_qc_dir, pattern = "^NPQ.*\\.csv$", full.names = TRUE)
-  # Exclude Low detectability files
-  primary_npq <- primary_npq[!grepl("Low", primary_npq)]
+if (length(npq_files) == 0 && dir.exists(primary_qc_input_dir)) {
+  # No NPQ file found - try to copy from Primary_QC/input_files
+  primary_npq <- list.files(primary_qc_input_dir, pattern = "^NPQ.*\\.csv$", full.names = TRUE)
 
   if (length(primary_npq) > 0) {
     # Use most recent file if multiple exist
@@ -77,7 +77,7 @@ if (length(npq_files) == 0 && dir.exists(primary_qc_dir)) {
       primary_npq <- primary_npq[which.max(file.mtime(primary_npq))]
     }
     file.copy(primary_npq, "input_files/")
-    message("Copied NPQ file from Primary_QC: ", basename(primary_npq))
+    message("Copied NPQ file from Primary_QC/input_files: ", basename(primary_npq))
     npq_files <- list.files("input_files", pattern = "^NPQ.*\\.csv$", full.names = TRUE)
   }
 }
@@ -89,31 +89,37 @@ if (length(npq_files) > 0) {
   }
   NPQ_data <- basename(npq_files)
 } else {
-  stop("No NPQ file found in input_files/ and could not copy from Primary_QC/output_files/")
+  stop("No NPQ file found in input_files/ and could not copy from Primary_QC/input_files/")
 }
 
 # --- Raw counts file ---
-if (!file.exists("input_files/Raw_counts.csv") && dir.exists(primary_qc_dir)) {
-  primary_raw <- file.path(primary_qc_dir, "Raw_counts.csv")
+if (!file.exists("input_files/Raw_counts.csv") && dir.exists(primary_qc_input_dir)) {
+  primary_raw <- file.path(primary_qc_input_dir, "Raw_counts.csv")
   if (file.exists(primary_raw)) {
     file.copy(primary_raw, "input_files/")
-    message("Copied Raw_counts.csv from Primary_QC")
+    message("Copied Raw_counts.csv from Primary_QC/input_files")
   }
 }
 
 # --- Sample_QC.csv file ---
-if (!file.exists("input_files/Sample_QC.csv") && dir.exists(primary_qc_dir)) {
-  primary_qc <- file.path(primary_qc_dir, "Sample_QC.csv")
-  if (file.exists(primary_qc)) {
-    file.copy(primary_qc, "input_files/")
-    message("Copied Sample_QC.csv from Primary_QC")
+if (!file.exists("input_files/Sample_QC.csv") && dir.exists(primary_qc_input_dir)) {
+  primary_qc_file <- file.path(primary_qc_input_dir, "Sample_QC.csv")
+  if (file.exists(primary_qc_file)) {
+    file.copy(primary_qc_file, "input_files/")
+    message("Copied Sample_QC.csv from Primary_QC/input_files")
   }
 }
 
 # --- Replicate list ---
-# This file must be created by analyst - cannot auto-copy
+# Try to copy from Primary_QC/input_files if it exists there
 if (!file.exists("input_files/Replicate_list.csv")) {
-  warning("Replicate_list.csv not found in input_files/. This file must be created manually.")
+  primary_rep <- file.path(primary_qc_input_dir, "Replicate_list.csv")
+  if (file.exists(primary_rep)) {
+    file.copy(primary_rep, "input_files/")
+    message("Copied Replicate_list.csv from Primary_QC/input_files")
+  } else {
+    warning("Replicate_list.csv not found. This file must be created manually.")
+  }
 }
 
 # ==============================================================================

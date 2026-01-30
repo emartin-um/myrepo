@@ -30,14 +30,14 @@ Comprehensive replicate analysis for assessing assay reproducibility.
 
 | File | Description | Source |
 |------|-------------|--------|
-| `NPQ_*.csv` | Post-QC NPQ data | Primary_QC output (auto-copied if missing) |
-| `Raw_counts.csv` | Raw read counts | Primary_QC output (auto-copied if missing) |
-| `Sample_QC.csv` | Sample QC metadata | Primary_QC output (auto-copied if missing) |
-| `Replicate_list.csv` | HIHG replicate sample IDs | Created by analyst |
+| `NPQ_*.csv` | Raw NPQ data (biomarkers as rows) | Primary_QC input (auto-copied if missing) |
+| `Raw_counts.csv` | Raw read counts | Primary_QC input (auto-copied if missing) |
+| `Sample_QC.csv` | Sample QC metadata | Primary_QC input (auto-copied if missing) |
+| `Replicate_list.csv` | HIHG replicate sample IDs | Primary_QC input or created by analyst |
 
-If NPQ, Raw_counts, or Sample_QC files are not found in `input_files/`, the pipeline will automatically copy them from `Primary_QC/output_files/`.
+If files are not found in `input_files/`, the pipeline will automatically copy them from `Primary_QC/input_files/` (the raw data files, not the processed outputs).
 
-**Note:** `Replicate_list.csv` must be created manually by the analyst - it contains the list of HIHG replicate sample IDs.
+**Note:** This analysis uses the raw NPQ file (biomarkers as rows, samples as columns), not the post-QC output file.
 
 **Output Files:**
 - `hihg_reps_NPQ.csv`, `sc_reps_NPQ.csv`, `nc_reps_NPQ.csv`, `ipc_reps_NPQ.csv` - NPQ values for each replicate type
@@ -48,9 +48,9 @@ If NPQ, Raw_counts, or Sample_QC files are not found in `input_files/`, the pipe
 
 Place your input data in `input_files/` (not tracked in git).
 
-If the required files from Primary_QC are not present, they will be automatically copied from `Primary_QC/output_files/` when you run the pipeline.
+If the required files are not present, they will be automatically copied from `Primary_QC/input_files/` when you run the pipeline.
 
-The only file you must create manually is `Replicate_list.csv` containing the HIHG replicate sample IDs.
+The `Replicate_list.csv` file may also be in Primary_QC/input_files if you've run Primary_QC before, otherwise create it manually.
 
 ## Output Files
 
@@ -78,13 +78,14 @@ See main repository README for full package list. Key packages:
 
 ## Workflow
 
-This analysis can run directly after Primary_QC (does not require Metadata_Merge):
+This analysis uses the same raw input files as Primary_QC (not the processed outputs):
 
 ```
-Primary_QC/output_files/
-    ├── NPQ_*.csv
+Primary_QC/input_files/
+    ├── NPQ_*.csv           (raw NPQ: biomarkers as rows)
     ├── Raw_counts.csv
-    └── Sample_QC.csv
+    ├── Sample_QC.csv
+    └── Replicate_list.csv
             │
             ▼ (auto-copied if input_files/ is empty)
 
@@ -92,7 +93,7 @@ Replicate_Analysis/input_files/
     ├── NPQ_*.csv
     ├── Raw_counts.csv
     ├── Sample_QC.csv
-    └── Replicate_list.csv  (create manually)
+    └── Replicate_list.csv
             │
             ▼ QC_Pipeline_Replicates.Rmd
 
