@@ -1,6 +1,8 @@
 # Utilities
 
-Shared R scripts and functions for data merging, filtering, and common operations used across multiple projects.
+Shared R functions used across multiple projects in this repository.
+
+> **Note:** The data merge pipeline (File_Merge.qmd, Apply_Filters.qmd) has moved to `Metadata_Merge/`. See `../Metadata_Merge/README.md` for documentation.
 
 ## Files
 
@@ -13,60 +15,7 @@ Common utility functions that can be sourced by any Rmd file in the repository.
 source("../Utilities/shared_functions.R")
 ```
 
-### File_Merge.qmd
-Merges post-QC NPQ biomarker files with metadata. Generates:
-- Merged datasets (standard, low, combined)
-- Sample exclusion report identifying duplicates and implausible values
-- Metadata quality control summaries
-
-**Required Input Files** (place in `Utilities/input_files/`):
-- `NPQ_post_QC.csv` - Standard post-QC biomarker data
-- `NPQ_Low_post_QC.csv` - Low post-QC biomarker data
-- `U19_Alamar_metadata.csv` - Sample metadata
-
-### Apply_Filters.qmd
-Applies exclusion filters from File_Merge.qmd to the merged datasets:
-- Removes flagged samples (duplicates, implausible values)
-- Outputs filtered datasets ready for analysis
-- Provides before/after filtering summaries
-
-**Input:** Uses output from File_Merge.qmd in `Utilities/output_files/`
-
-### run_data_merge_pipeline.R
-**Automated pipeline script** that runs the full data merge workflow:
-1. Copies post-QC files from `Primary_QC/output_files/` to `Utilities/input_files/`
-2. Runs `File_Merge.qmd` to merge biomarker data with metadata
-3. Runs `Apply_Filters.qmd` to apply exclusion filters
-
-**Usage:**
-```bash
-cd Utilities/
-
-# Full pipeline
-Rscript run_data_merge_pipeline.R
-
-# Re-run filtering only (after manually editing exclusion report)
-Rscript run_data_merge_pipeline.R --filter-only
-```
-
-**Configuration:**
-- `NPQ_DATE_PATTERN`: Set to specific date (e.g., "20251220") or `NULL` for auto-detect
-- Auto-detect finds the most recent NPQ files by modification time
-
-**Prerequisites:**
-- Primary_QC pipeline must have been run first
-- `U19_Alamar_metadata.csv` must be in `Utilities/input_files/`
-
-**Output:**
-- Prints summary of exclusion reasons and counts
-- Final filtered datasets in `output_files/filtered/`
-
-**Manual Exclusion Editing:**
-1. Run the full pipeline first
-2. Edit `output_files/sample_exclusion_report.csv` - change `exclude` column from `TRUE` to `FALSE` for samples you want to keep
-3. Run `Rscript run_data_merge_pipeline.R --filter-only` to re-apply filters
-
-## Function Reference (shared_functions.R)
+## Function Reference
 
 ### Data Summarization
 
@@ -160,28 +109,6 @@ Print a markdown section header for Rmd output.
 
 #### `print_param(key, value)`
 Print a key-value pair in bold markdown format.
-
-## Workflow
-
-### Automated (Recommended)
-Run the pipeline script after Primary_QC is complete:
-```bash
-cd Utilities/
-Rscript run_data_merge_pipeline.R
-```
-
-### Manual
-For File_Merge and Apply_Filters, run in sequence:
-1. Copy post-QC files from `Primary_QC/output_files/` to `Utilities/input_files/`
-2. Run `File_Merge.qmd` first to merge files and generate exclusion report
-3. Review `output_files/sample_exclusion_report.csv` if needed
-4. Run `Apply_Filters.qmd` to apply filters and create final datasets
-
-## Input/Output
-
-Scripts use directories within the Utilities folder:
-- `input_files/` - Source data files (NPQ post-QC data, metadata)
-- `output_files/` - Merged and filtered outputs
 
 ## Dependencies
 

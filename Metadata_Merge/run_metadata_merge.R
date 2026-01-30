@@ -1,35 +1,43 @@
 #!/usr/bin/env Rscript
 # =============================================================================
-# Data Merge Pipeline
+# Metadata Merge Pipeline
 # =============================================================================
 # This script automates the data merge workflow:
-# 1. Copies post-QC files from Primary_QC/output_files to Utilities/input_files
+# 1. Optionally copies post-QC files from Primary_QC/output_files
 # 2. Runs File_Merge.qmd to merge biomarker data with metadata
 # 3. Runs Apply_Filters.qmd to apply exclusion filters
 #
 # Usage:
-#   Full pipeline:
-#     Rscript run_data_merge_pipeline.R
+#   Full pipeline (will prompt before copying):
+#     Rscript run_metadata_merge.R
+#
+#   Skip copy step (use existing files in input_files/):
+#     Rscript run_metadata_merge.R --no-copy
 #
 #   Re-run filtering only (after manually editing exclusion report):
-#     Rscript run_data_merge_pipeline.R --filter-only
+#     Rscript run_metadata_merge.R --filter-only
 #
-#   OR source from RStudio with working directory set to Utilities/
+#   Non-interactive mode (auto-confirm copy):
+#     Rscript run_metadata_merge.R --yes
 #
 # Prerequisites:
-#   - Primary_QC pipeline must have been run first
-#   - U19_Alamar_metadata.csv must be in Utilities/input_files/
+#   - Primary_QC pipeline must have been run first (if copying)
+#   - Metadata file must be in input_files/
 # =============================================================================
 
 library(tidyverse)
 library(knitr)
 
 # -----------------------------------------------------------------------------
-# Parse command line arguments
+# Parse command line arguments (or use pre-set variables in RStudio)
 # -----------------------------------------------------------------------------
+# In RStudio, you can set these before source():
+#   FILTER_ONLY <- TRUE
+#   source("run_metadata_merge.R")
 
 args <- commandArgs(trailingOnly = TRUE)
-FILTER_ONLY <- "--filter-only" %in% args
+if (!exists("FILTER_ONLY")) FILTER_ONLY <- "--filter-only" %in% args
+if (!exists("NO_COPY")) NO_COPY <- "--no-copy" %in% args
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -39,14 +47,41 @@ FILTER_ONLY <- "--filter-only" %in% args
 # Set to NULL to auto-detect the most recent files
 NPQ_DATE_PATTERN <- NULL  # e.g., "20251220" or NULL for auto-detect
 
-# Paths (relative to Utilities folder)
+# Paths (relative to Metadata_Merge folder)
 PRIMARY_QC_OUTPUT <- "../Primary_QC/output_files"
-UTILITIES_INPUT <- "input_files"
-UTILITIES_OUTPUT <- "output_files"
+INPUT_DIR <- "input_files"
+OUTPUT_DIR <- "output_files"
+
+# Expected input file names
+NPQ_STANDARD_FILE <- "NPQ_post_QC.csv"
+NPQ_LOW_FILE <- "NPQ_Low_post_QC.csv"
+# METADATA_FILE is auto-detected (any file with "metadata" in the name)
 
 # -----------------------------------------------------------------------------
 # Helper Functions
 # -----------------------------------------------------------------------------
+
+find_metadata_file <- function(input_dir) {
+  # Find any file with "metadata" in the name (case-insensitive)
+  all_files <- list.files(input_dir, full.names = TRUE)
+  metadata_files <- all_files[grepl("metadata", basename(all_files), ignore.case = TRUE)]
+
+  if (length(metadata_files) == 0) {
+    stop("No metadata file found in ", input_dir, "\n",
+         "  Expected: a file with 'metadata' in the name (e.g., U19_Alamar_metadata.csv)")
+  }
+
+  if (length(metadata_files) > 1) {
+    # If multiple, take the most recently modified
+    cat("  Note: Found multiple metadata files, using most recent:\n")
+    for (f in metadata_files) {
+      cat("    ", basename(f), "\n")
+    }
+    metadata_files <- metadata_files[which.max(file.mtime(metadata_files))]
+  }
+
+  return(metadata_files)
+}
 
 find_latest_npq_files <- function(output_dir) {
   # Find all post_QC files (not triage, not Low)
@@ -77,7 +112,7 @@ run_qmd_as_r <- function(qmd_file) {
 }
 
 show_exclusion_summary <- function() {
-  exclusion_report <- read_csv(file.path(UTILITIES_OUTPUT, "sample_exclusion_report.csv"),
+  exclusion_report <- read_csv(file.path(OUTPUT_DIR, "sample_exclusion_report.csv"),
                                show_col_types = FALSE)
   n_exclude <- sum(exclusion_report$exclude)
   n_keep <- sum(!exclusion_report$exclude)
@@ -107,54 +142,91 @@ show_exclusion_summary <- function() {
 cat("\n")
 cat(strrep("=", 72), "\n")
 if (FILTER_ONLY) {
-  cat("  DATA MERGE PIPELINE - FILTER ONLY MODE\n")
+  cat("  METADATA MERGE PIPELINE - FILTER ONLY MODE\n")
 } else {
-  cat("  DATA MERGE PIPELINE\n")
+  cat("  METADATA MERGE PIPELINE\n")
 }
 cat(strrep("=", 72), "\n\n")
 
 # Verify we're in the right directory
 if (!file.exists("File_Merge.qmd")) {
-  stop("This script must be run from the Utilities/ directory")
+  stop("This script must be run from the Metadata_Merge/ directory")
 }
 
 if (!FILTER_ONLY) {
   # -----------------------------------------------------------------------------
-  # Step 1: Copy files from Primary_QC
+  # Step 1: Copy files from Primary_QC (only if no NPQ files exist)
   # -----------------------------------------------------------------------------
-  cat("STEP 1: Copying post-QC files from Primary_QC...\n")
-  cat(strrep("-", 52), "\n")
 
-  if (!is.null(NPQ_DATE_PATTERN)) {
-    # Use specified date pattern
-    standard_src <- file.path(PRIMARY_QC_OUTPUT, paste0("NPQ_", NPQ_DATE_PATTERN, "_post_QC.csv"))
-    low_src <- file.path(PRIMARY_QC_OUTPUT, paste0("NPQ_", NPQ_DATE_PATTERN, "_Low_post_QC.csv"))
+  # Check if NPQ files already exist in input_files/
+  existing_npq <- list.files(INPUT_DIR, pattern = "NPQ", ignore.case = TRUE)
 
-    if (!file.exists(standard_src) || !file.exists(low_src)) {
-      stop("Specified NPQ files not found for date: ", NPQ_DATE_PATTERN)
+  if (!NO_COPY && length(existing_npq) == 0) {
+    cat("STEP 1: Copy post-QC files from Primary_QC\n")
+    cat(strrep("-", 52), "\n")
+    cat("  No NPQ files found in input_files/ - copying from Primary_QC...\n\n")
+
+    # Find source files
+    if (!is.null(NPQ_DATE_PATTERN)) {
+      standard_src <- file.path(PRIMARY_QC_OUTPUT, paste0("NPQ_", NPQ_DATE_PATTERN, "_post_QC.csv"))
+      low_src <- file.path(PRIMARY_QC_OUTPUT, paste0("NPQ_", NPQ_DATE_PATTERN, "_Low_post_QC.csv"))
+
+      if (!file.exists(standard_src) || !file.exists(low_src)) {
+        stop("Specified NPQ files not found for date: ", NPQ_DATE_PATTERN)
+      }
+    } else {
+      npq_files <- find_latest_npq_files(PRIMARY_QC_OUTPUT)
+      standard_src <- npq_files$standard
+      low_src <- npq_files$low
     }
+
+    cat("  Found in Primary_QC/output_files/:\n")
+    cat("    Standard: ", basename(standard_src), "\n")
+    cat("    Low:      ", basename(low_src), "\n\n")
+
+    standard_dest <- file.path(INPUT_DIR, NPQ_STANDARD_FILE)
+    low_dest <- file.path(INPUT_DIR, NPQ_LOW_FILE)
+
+    file.copy(standard_src, standard_dest, overwrite = TRUE)
+    file.copy(low_src, low_dest, overwrite = TRUE)
+    cat("  Files copied successfully.\n\n")
+
   } else {
-    # Auto-detect latest files
-    npq_files <- find_latest_npq_files(PRIMARY_QC_OUTPUT)
-    standard_src <- npq_files$standard
-    low_src <- npq_files$low
+    cat("STEP 1: Using existing NPQ files in input_files/\n")
+    cat(strrep("-", 52), "\n")
+    if (NO_COPY) {
+      cat("  --no-copy flag specified.\n")
+    } else {
+      cat("  Found existing NPQ files:\n")
+      for (f in existing_npq) {
+        cat("    -", f, "\n")
+      }
+    }
+    cat("\n")
   }
 
-  cat("  Source (standard):", basename(standard_src), "\n")
-  cat("  Source (low):     ", basename(low_src), "\n")
+  # Verify required files exist
+  standard_file <- file.path(INPUT_DIR, NPQ_STANDARD_FILE)
+  low_file <- file.path(INPUT_DIR, NPQ_LOW_FILE)
 
-  # Copy files
-  file.copy(standard_src, file.path(UTILITIES_INPUT, "NPQ_post_QC.csv"), overwrite = TRUE)
-  file.copy(low_src, file.path(UTILITIES_INPUT, "NPQ_Low_post_QC.csv"), overwrite = TRUE)
+  missing_files <- c()
+  if (!file.exists(standard_file)) missing_files <- c(missing_files, NPQ_STANDARD_FILE)
+  if (!file.exists(low_file)) missing_files <- c(missing_files, NPQ_LOW_FILE)
 
-  cat("  Copied to:", UTILITIES_INPUT, "\n\n")
-
-  # Verify metadata exists
-  metadata_file <- file.path(UTILITIES_INPUT, "U19_Alamar_metadata.csv")
-  if (!file.exists(metadata_file)) {
-    stop("Metadata file not found: ", metadata_file)
+  if (length(missing_files) > 0) {
+    stop("Missing required files in input_files/:\n  - ", paste(missing_files, collapse = "\n  - "))
   }
-  cat("  Metadata file found:", basename(metadata_file), "\n\n")
+
+  # Auto-detect metadata file
+  metadata_file <- find_metadata_file(INPUT_DIR)
+
+  cat("  Input files verified:\n")
+  cat("    -", NPQ_STANDARD_FILE, "\n")
+  cat("    -", NPQ_LOW_FILE, "\n")
+  cat("    -", basename(metadata_file), "(auto-detected)\n\n")
+
+  # Set environment variable so File_Merge.qmd can find it
+  Sys.setenv(METADATA_FILE = metadata_file)
 
   # -----------------------------------------------------------------------------
   # Step 2: Run File_Merge.qmd
@@ -165,7 +237,7 @@ if (!FILTER_ONLY) {
   run_qmd_as_r("File_Merge.qmd")
 
   cat("\n  Merge complete. Output files:\n")
-  merge_outputs <- list.files(UTILITIES_OUTPUT, pattern = "^merged_.*\\.csv$")
+  merge_outputs <- list.files(OUTPUT_DIR, pattern = "^merged_.*\\.csv$")
   for (f in merge_outputs) {
     cat("    -", f, "\n")
   }
@@ -179,12 +251,12 @@ if (!FILTER_ONLY) {
   cat("FILTER-ONLY MODE: Skipping Steps 1-2\n")
   cat(strrep("-", 52), "\n")
 
-  exclusion_file <- file.path(UTILITIES_OUTPUT, "sample_exclusion_report.csv")
+  exclusion_file <- file.path(OUTPUT_DIR, "sample_exclusion_report.csv")
   if (!file.exists(exclusion_file)) {
     stop("Exclusion report not found. Run full pipeline first (without --filter-only)")
   }
 
-  merged_file <- file.path(UTILITIES_OUTPUT, "merged_combined_post_QC.csv")
+  merged_file <- file.path(OUTPUT_DIR, "merged_combined_post_QC.csv")
   if (!file.exists(merged_file)) {
     stop("Merged files not found. Run full pipeline first (without --filter-only)")
   }
@@ -206,12 +278,17 @@ if (FILTER_ONLY) {
 }
 cat(strrep("-", 52), "\n")
 
+# Create filtered output directory if needed
+if (!dir.exists(file.path(OUTPUT_DIR, "filtered"))) {
+  dir.create(file.path(OUTPUT_DIR, "filtered"))
+}
+
 run_qmd_as_r("Apply_Filters.qmd")
 
 cat("\n  Filtering complete. Final datasets:\n")
-filtered_outputs <- list.files(file.path(UTILITIES_OUTPUT, "filtered"), pattern = "\\.csv$")
+filtered_outputs <- list.files(file.path(OUTPUT_DIR, "filtered"), pattern = "\\.csv$")
 for (f in filtered_outputs) {
-  fpath <- file.path(UTILITIES_OUTPUT, "filtered", f)
+  fpath <- file.path(OUTPUT_DIR, "filtered", f)
   df <- read_csv(fpath, show_col_types = FALSE)
   cat("    -", f, "(", nrow(df), "samples x", ncol(df), "columns )\n")
 }
@@ -221,12 +298,12 @@ cat(strrep("=", 72), "\n")
 cat("  PIPELINE COMPLETE\n")
 cat(strrep("=", 72), "\n")
 cat("\nFiltered datasets ready for analysis in:\n")
-cat("  ", file.path(UTILITIES_OUTPUT, "filtered"), "\n")
+cat("  ", file.path(OUTPUT_DIR, "filtered"), "\n")
 
 if (!FILTER_ONLY) {
   cat("\nTo manually edit exclusions and re-filter:\n")
   cat("  1. Edit output_files/sample_exclusion_report.csv\n")
   cat("     (change 'exclude' column from TRUE to FALSE to keep samples)\n")
-  cat("  2. Run: Rscript run_data_merge_pipeline.R --filter-only\n")
+  cat("  2. Run: Rscript run_metadata_merge.R --filter-only\n")
 }
 cat("\n")

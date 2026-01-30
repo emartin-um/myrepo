@@ -27,8 +27,25 @@ library(tidyverse)
 library(knitr)
 library(kableExtra)
 
-# Read metadata file
-metadata <- read_csv("input_files/U19_Alamar_metadata.csv")
+# Read metadata file - check for environment variable first (from run_metadata_merge.R)
+# Otherwise auto-detect file with "metadata" in the name
+metadata_file <- Sys.getenv("METADATA_FILE", unset = "")
+if (metadata_file == "") {
+  # Auto-detect metadata file in input_files/
+  metadata_files <- list.files("input_files", pattern = "metadata", ignore.case = TRUE, full.names = TRUE)
+  if (length(metadata_files) == 0) {
+    stop("No metadata file found in input_files/. Expected a file with 'metadata' in the name.")
+  }
+  if (length(metadata_files) > 1) {
+    # Use most recent
+    metadata_file <- metadata_files[which.max(file.mtime(metadata_files))]
+    cat("Multiple metadata files found, using:", basename(metadata_file), "\n")
+  } else {
+    metadata_file <- metadata_files[1]
+  }
+}
+cat("Using metadata file:", basename(metadata_file), "\n")
+metadata <- read_csv(metadata_file)
 
 # Rename APOE in metadata to APOE.geno and create Group_Race_Ethnicity
 metadata <- metadata %>%
