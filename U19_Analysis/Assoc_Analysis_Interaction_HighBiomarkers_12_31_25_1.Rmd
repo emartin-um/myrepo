@@ -2,7 +2,7 @@
 title: "Association Analysis of High-Count/High-Detectability Biomarkers in U19 Data"
 author: "ERM"
 date: "`r Sys.Date()`"
-output: 
+output:
   html_document:
     toc: true
     toc_depth: 5
@@ -12,20 +12,27 @@ output:
 
 # A. Overview
 
-This report is an examination of the High-Count and High-Detectability biomarkers after primary QC. 
+This report is an examination of the High-Count and High-Detectability biomarkers after primary QC.
 12/31/25 I am adapting this to work with larger ALZ123 dataset.
 This fixes a mistake in previous version where I used the wrong SS for the CDX F-test. Now I use Type II SS.
 
+> **Note:** This script uses shared utility functions from `Utilities/shared_functions.R` and can load pre-merged data from `Metadata_Merge/`.
+
 ## A.1 Input Data
 
-**Required Input Data Files:** Place all files in a folder called `input_files` in the working directory.
+**Preferred Input (from Metadata_Merge pipeline):**
 
-1. **Post-QC Biomarker NPQ data for High-read/High-det markers** (`NPQ_xxxxxxxx_post.csv`) Rows: samples; Columns: biomarkers; Copied from Primary QC `output_files` directory. Assign the filename to the variable `NPQ_data` below.
+1. `filtered_combined_post_QC.csv` - Pre-merged biomarker + metadata from Metadata_Merge
+
+**Alternative Input (legacy):**
+
+1. **Post-QC Biomarker NPQ data for High-read/High-det markers** (`NPQ_xxxxxxxx_post.csv`) Rows: samples; Columns: biomarkers; Copied from Primary QC `output_files` directory.
 2. **Meta-data for U19 samples** (`U19_Alamar_metadata_2025Dec01.csv`)
 
-**OR**
-1. Meta_plus_file <- NULL  # e.g., "meta_plus.csv" to skip data prep
-2. Biomarker_groups_file <- NULL  # e.g., "biomarker_groups.csv" to skip clustering
+**OR** skip data prep:
+
+1. `meta_plus_race_dx.csv` - From univariate analysis
+2. `biomarker_groups.csv` - Cluster assignments (optional)
 
 
 **Output Data Files:** Analyst should create a folder `output_files` in the working directory.
@@ -46,14 +53,31 @@ Adjustable QC parameters include:
 ```{r setup, message=FALSE, warning=FALSE}
 library(tidyverse)
 
+# Source shared utility functions
+source("../Utilities/shared_functions.R")
+
 # Optional: If these files exist, skip sections B and C
 Meta_plus_file <- "meta_plus_race_dx.csv"  # e.g., "meta_plus.csv" to skip data prep
 Biomarker_groups_file <- "biomarker_groups.csv"  # e.g., "biomarker_groups.csv" to skip clustering
 
 # Input filenames (only needed if optional files not provided)
 if (is.null(Meta_plus_file)) {
-  NPQ_data <- "NPQ_20251220_post_QC.csv" #SPECIFY THE FILE NAME CONTAINING NPQ DATA
-  Meta_data <- "U19_Alamar_metadata_2025Dec17.csv" #SPECIFY THE FILE NAME CONTAINING META DATA
+  # Try Metadata_Merge output first
+  merged_file <- "input_files/filtered_combined_post_QC.csv"
+  merged_fallback <- "../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv"
+
+  if (file.exists(merged_file)) {
+    use_merged_data <- TRUE
+    input_file <- merged_file
+  } else if (file.exists(merged_fallback)) {
+    use_merged_data <- TRUE
+    input_file <- merged_fallback
+  } else {
+    # Fall back to separate files
+    use_merged_data <- FALSE
+    NPQ_data <- "NPQ_20251220_post_QC.csv"
+    Meta_data <- "U19_Alamar_metadata_2025Dec17.csv"
+  }
 }
 
 # Create output folder if it doesn't exist
@@ -62,7 +86,6 @@ if (!dir.exists("output_files")) dir.create("output_files")
 # Thresholds
 FDR <- 0.05
 min_group_n <- 3  # Minimum observations required per group in association tests
-# Add this in the setup chunk after the other parameters
 remove_outliers <- FALSE  # Set to TRUE to remove outliers
 outlier_method <- "iqr"  # Options: "iqr", "mad", "zscore"
 outlier_threshold <- 4  # For IQR: multiplier (e.g., 3*IQR); for zscore: number of SDs
@@ -77,22 +100,22 @@ Sample Counts:
 library(tidyverse)
 
 # --- Read biomarker NPQ data ---
-df <- read_csv(file.path("input_files", NPQ_data), show_col_types = FALSE)
-
-#Function to summarize numbers of samples by Run/Bay
-summarize_counts <- function(df, type_name) {
-  df %>%
-    group_by(Run, Bay) %>%
-    summarise(!!type_name := n(), .groups = "drop")
+# Use Metadata_Merge output if available, otherwise fall back to separate files
+if (exists("use_merged_data") && use_merged_data) {
+  df <- read_csv(input_file, show_col_types = FALSE)
+  cat("Loaded pre-merged data from:", input_file, "\n")
+} else {
+  df <- read_csv(file.path("input_files", NPQ_data), show_col_types = FALSE)
+  cat("Loaded NPQ data from:", NPQ_data, "\n")
 }
 
-# Summarize counts by Run × Bay
-df_summary <- df %>%
-  group_by(Run, Bay) %>%
-  summarise(All_Samples = n(), .groups = "drop") %>%
-  arrange(Run, Bay)
-
-print(df_summary)
+# Summarize counts by Run × Bay (uses shared summarize_counts function)
+if ("Run" %in% names(df) && "Bay" %in% names(df)) {
+  df_summary <- summarize_counts(df, "All_Samples")
+  print(df_summary)
+} else {
+  cat("Total samples:", nrow(df), "\n")
+}
 ```
 
 ```{r load-meta-plus-early, message=FALSE, warning=FALSE, echo=TRUE, eval=!is.null(Meta_plus_file)}
@@ -328,59 +351,28 @@ I'm curious to look at error above and below the lod. Also, how are these dostri
 ```{r get_meta, message=FALSE, warning=FALSE, echo=TRUE, results= 'asis', eval=is.null(Meta_plus_file)}
 library(dplyr)
 
-summarize_df_pretty <- function(df, exclude_cols = NULL) {
-  
-  # Exclude columns if specified
-  if (!is.null(exclude_cols)) {
-    df <- df %>% select(-all_of(exclude_cols))
-  }
-  
-  # --- Numeric summary ---
-  num_summary <- df %>%
-    select(where(is.numeric)) %>%
-    pivot_longer(cols = everything(), names_to = "Column", values_to = "Value") %>%
-    group_by(Column) %>%
-    summarise(
-      Summary = paste0(
-        "min=", round(min(Value, na.rm = TRUE),2), 
-        ", Q1=", round(quantile(Value, 0.25, na.rm = TRUE),2),
-        ", median=", round(median(Value, na.rm = TRUE),2),
-        ", Q3=", round(quantile(Value, 0.75, na.rm = TRUE),2),
-        ", max=", round(max(Value, na.rm = TRUE),2),
-        ", mean=", round(mean(Value, na.rm = TRUE), 2),
-        ", sd=", round(sd(Value, na.rm = TRUE), 2)
-      ),
-      .groups = "drop"
-    )
-  
-  # --- Character/factor summary ---
-  char_summary <- df %>%
-    select(where(~is.character(.) || is.factor(.))) %>%
-    pivot_longer(cols = everything(), names_to = "Column", values_to = "Value") %>%
-    group_by(Column, Value) %>%
-    summarise(Count = n(), .groups = "drop") %>%
-    arrange(Column, desc(Count)) %>%
-    group_by(Column) %>%
-    summarise(Summary = paste0(Value, " (", Count, ")", collapse = "; "), .groups = "drop")
-  
-  # --- Combine numeric and character summaries ---
-  bind_rows(num_summary, char_summary) %>%
-    arrange(Column)
+# Check if we already have merged data
+if (exists("use_merged_data") && use_merged_data) {
+  # Data already merged from Metadata_Merge
+  meta_plus <- df
+  cat("Using pre-merged data from Metadata_Merge\n")
+} else {
+  # Legacy merge from separate files
+  meta_df <- read_csv(file.path("input_files", Meta_data), show_col_types = FALSE)
+
+  meta_plus <- meta_df %>%
+    semi_join(df, by = c("SAMPLE_ALIQUOT" = "SampleID")) %>%
+    left_join(df, by = c("SAMPLE_ALIQUOT" = "SampleID"))
+
+  meta_plus <- meta_plus %>%
+    rename(SampleID = SAMPLE_ALIQUOT, APOE.geno = APOE.x, APOE = APOE.y)
 }
 
-meta_df <- read_csv(file.path("input_files", Meta_data), show_col_types = FALSE)
-
-meta_plus <- meta_df %>%
-  semi_join(df, by = c("SAMPLE_ALIQUOT" = "SampleID")) %>%   # keep only matching samples
-  left_join(
-    df ,
-    by = c("SAMPLE_ALIQUOT" = "SampleID")
-  )
-
-meta_plus <- meta_plus %>% rename(SampleID = SAMPLE_ALIQUOT, APOE.geno = APOE.x, APOE = APOE.y) #This is combined covariate and biom data
-
-summary_table <- summarize_df_pretty(meta_plus[,5:23])
-knitr::kable(summary_table, caption = "Summary of Meta-data")
+# Use shared summarize_df_pretty function
+if (ncol(meta_plus) >= 23) {
+  summary_table <- summarize_df_pretty(meta_plus[, 5:23])
+  knitr::kable(summary_table, caption = "Summary of Meta-data")
+}
 
 knitr::kable(meta_plus %>% count(Race, Ethnicity, sex))
 
@@ -395,50 +387,9 @@ if (!exists("meta_plus")) {
 cat("Loaded meta_plus from", Meta_plus_file, "\n")
 cat("Dimensions:", nrow(meta_plus), "rows x", ncol(meta_plus), "columns\n\n")
 
-# Function to summarize dataframe
-summarize_df_pretty <- function(df, exclude_cols = NULL) {
-  
-  # Exclude columns if specified
-  if (!is.null(exclude_cols)) {
-    df <- df %>% select(-all_of(exclude_cols))
-  }
-  
-  # --- Numeric summary ---
-  num_summary <- df %>%
-    select(where(is.numeric)) %>%
-    pivot_longer(cols = everything(), names_to = "Column", values_to = "Value") %>%
-    group_by(Column) %>%
-    summarise(
-      Summary = paste0(
-        "min=", round(min(Value, na.rm = TRUE),2), 
-        ", Q1=", round(quantile(Value, 0.25, na.rm = TRUE),2),
-        ", median=", round(median(Value, na.rm = TRUE),2),
-        ", Q3=", round(quantile(Value, 0.75, na.rm = TRUE),2),
-        ", max=", round(max(Value, na.rm = TRUE),2),
-        ", mean=", round(mean(Value, na.rm = TRUE), 2),
-        ", sd=", round(sd(Value, na.rm = TRUE), 2)
-      ),
-      .groups = "drop"
-    )
-  
-  # --- Character/factor summary ---
-  char_summary <- df %>%
-    select(where(~is.character(.) || is.factor(.))) %>%
-    pivot_longer(cols = everything(), names_to = "Column", values_to = "Value") %>%
-    group_by(Column, Value) %>%
-    summarise(Count = n(), .groups = "drop") %>%
-    arrange(Column, desc(Count)) %>%
-    group_by(Column) %>%
-    summarise(Summary = paste0(Value, " (", Count, ")", collapse = "; "), .groups = "drop")
-  
-  # --- Combine numeric and character summaries ---
-  bind_rows(num_summary, char_summary) %>%
-    arrange(Column)
-}
-
-# Summary table
-if (ncol(meta_plus) >= 16) {
-  summary_table <- summarize_df_pretty(meta_plus[,5:23])
+# Use shared summarize_df_pretty function
+if (ncol(meta_plus) >= 23) {
+  summary_table <- summarize_df_pretty(meta_plus[, 5:23])
   knitr::kable(summary_table, caption = "Summary of Meta-data")
 }
 
@@ -456,100 +407,7 @@ For each Group of biomarkers, test for association adjusting for covariates. Tes
 library(dplyr)
 library(tidyr)
 
-# Function to identify outliers
-identify_outliers <- function(data, biomarker_groups, method = "iqr", threshold = 3, 
-                              sample_id_col = "SampleID") {
-  
-  # Get all biomarker columns
-  all_biomarkers <- unlist(biomarker_groups)
-  
-  outlier_list <- list()
-  outlier_summary <- data.frame()
-  outlier_details <- list()
-  
-  for (biomarker in all_biomarkers) {
-    if (!biomarker %in% names(data)) next
-    
-    values <- data[[biomarker]]
-    
-    if (method == "iqr") {
-      # IQR method (Tukey's fences)
-      Q1 <- quantile(values, 0.25, na.rm = TRUE)
-      Q3 <- quantile(values, 0.75, na.rm = TRUE)
-      IQR <- Q3 - Q1
-      lower_fence <- Q1 - threshold * IQR
-      upper_fence <- Q3 + threshold * IQR
-      outliers <- which(values < lower_fence | values > upper_fence)
-      
-    } else if (method == "mad") {
-      # Median Absolute Deviation (more robust)
-      med <- median(values, na.rm = TRUE)
-      mad <- median(abs(values - med), na.rm = TRUE)
-      lower_fence <- med - threshold * mad
-      upper_fence <- med + threshold * mad
-      outliers <- which(values < lower_fence | values > upper_fence)
-      
-    } else if (method == "zscore") {
-      # Z-score method
-      mean_val <- mean(values, na.rm = TRUE)
-      sd_val <- sd(values, na.rm = TRUE)
-      z_scores <- abs((values - mean_val) / sd_val)
-      outliers <- which(z_scores > threshold)
-    }
-    
-    if (length(outliers) > 0) {
-      outlier_list[[biomarker]] <- outliers
-      
-      # Get sample IDs and values for outliers with additional info
-      outlier_df <- data.frame(
-        Biomarker = biomarker,
-        Value = values[outliers]
-      )
-      
-      if (sample_id_col %in% names(data)) {
-        outlier_df$SampleID <- data[[sample_id_col]][outliers]
-      }
-      
-      if ("CDX" %in% names(data)) {
-        outlier_df$CDX <- data[["CDX"]][outliers]
-      }
-      
-      if ("age_at_sample" %in% names(data)) {
-        outlier_df$age_at_sample <- data[["age_at_sample"]][outliers]
-      }
-      
-      if ("Group2" %in% names(data)) {
-        outlier_df$Group2 <- data[["Group2"]][outliers]
-      }
-      
-      if ("Country/State" %in% names(data)) {
-        outlier_df$`Country/State` <- data[["Country/State"]][outliers]
-      }
-      
-      # Sort by Value (highest to lowest)
-      outlier_df <- outlier_df %>% arrange(desc(Value))
-      
-      outlier_details[[biomarker]] <- outlier_df
-      
-      # Add to summary
-      outlier_summary <- bind_rows(
-        outlier_summary,
-        data.frame(
-          Biomarker = biomarker,
-          N_outliers = length(outliers),
-          Pct_outliers = round(100 * length(outliers) / length(values), 2),
-          Method = method,
-          Threshold = threshold
-        )
-      )
-    }
-  }
-  
-  return(list(outliers = outlier_list, 
-              summary = outlier_summary, 
-              details = outlier_details))
-}
-
+# Uses shared identify_outliers function from shared_functions.R
 # Identify outliers
 cat("**Method:**", outlier_method, "\n")
 cat("**Threshold:**", outlier_threshold, "\n\n")
@@ -626,8 +484,12 @@ library(ggplot2)
 library(tidyr)
 library(gridExtra)
 library(emmeans)
-library(car)  # Add to your libraries
+library(car)
 
+# Note: run_cdx_analysis is a specialized analysis function kept here rather than
+# in shared_functions.R because it's specific to this U19 CDX analysis workflow.
+# The shared protect_name from shared_functions.R is available, but we keep a
+# local copy for self-containment.
 
 # Function to run CDX association analysis with adjustable covariates
 run_cdx_analysis <- function(meta_plus, biomarker_groups, 

@@ -2,12 +2,15 @@
 
 Statistical analyses specific to the U19 grant objectives, including biomarker association testing with clinical diagnosis (CDX), covariate effects, and interaction analyses.
 
+> **Note:** These scripts now use the unified data pipeline from `Metadata_Merge/` and shared functions from `Utilities/shared_functions.R`.
+
 ## Usage
 
 1. Open `U19_Analysis.Rproj` in RStudio
-2. Place input data files in `input_files/`
-3. Run analysis scripts in order (univariate first, then interaction)
-4. Outputs will be saved to `output_files/`
+2. **Preferred:** Run `Metadata_Merge/` pipeline first, then copy output to `input_files/`
+3. Alternatively, place raw input files in `input_files/` (scripts have fallback loading)
+4. Run analysis scripts in order (univariate first, then interaction)
+5. Outputs will be saved to `output_files/`
 
 ## Scripts
 
@@ -27,14 +30,20 @@ Univariate association analysis for high-quality biomarkers.
 | `FDR` | 0.05 | False discovery rate threshold |
 | `n_groups` | 8 | Number of biomarker clusters |
 
-**Required Input Files:**
-- `NPQ_[date]_post_QC.csv` - Post-QC biomarker data from Primary_QC
-- `U19_Alamar_metadata_[date].csv` - Sample metadata with phenotypes
+**Input Files (in order of preference):**
+1. `input_files/filtered_combined_post_QC.csv` - Pre-merged data from Metadata_Merge
+2. `../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv` - Direct fallback
+3. Manual merge from `NPQ_[date]_post_QC.csv` + `U19_Alamar_metadata_[date].csv` (legacy)
 
 **Output Files:**
 - `biomarker_groups.csv` - Cluster assignments for biomarkers
 - `meta_plus_race_dx.csv` - Merged biomarker + metadata for downstream analysis
 - Correlation heatmaps and association plots
+
+**Shared Functions Used:**
+- `test_covariate_associations()` - Association testing with FDR correction
+- `plot_group_heatmaps()` - Correlation heatmaps by biomarker group
+- `summarize_df_pretty()`, `summarize_counts()`, `protect_name()`
 
 ---
 
@@ -57,10 +66,11 @@ Interaction analysis for CDX associations with covariate adjustment.
 | `outlier_method` | "iqr" | Outlier detection method |
 | `outlier_threshold` | 4 | IQR multiplier for outliers |
 
-**Required Input Files:**
-- `meta_plus_race_dx.csv` - From univariate analysis OR
-- `NPQ_[date]_post_QC.csv` + `U19_Alamar_metadata_[date].csv`
-- `biomarker_groups.csv` - Cluster assignments (optional, can skip clustering)
+**Input Files (in order of preference):**
+1. `input_files/meta_plus_race_dx.csv` - From univariate analysis
+2. `input_files/filtered_combined_post_QC.csv` - Pre-merged from Metadata_Merge
+3. `../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv` - Direct fallback
+4. `biomarker_groups.csv` - Cluster assignments (optional, can skip clustering)
 
 **Output Files:**
 - `outlier_details.csv` - Identified outlier samples
@@ -69,7 +79,12 @@ Interaction analysis for CDX associations with covariate adjustment.
 
 ## Input Files
 
-Place your input data in `input_files/` (not tracked in git):
+Place your input data in `input_files/` (not tracked in git).
+
+**Preferred:** Use pre-merged data from Metadata_Merge pipeline:
+- `filtered_combined_post_QC.csv` - Combined biomarker + metadata
+
+**Alternative:** Raw input files for manual merge:
 - Post-QC NPQ data from `Primary_QC/output_files/`
 - U19 sample metadata with phenotype information
 - Biomarker group assignments (optional)
@@ -97,14 +112,18 @@ See main repository README for full package list. Key packages:
 Recommended analysis order:
 
 ```
-Primary_QC/output_files/
+Metadata_Merge/
     |
-    +-- NPQ_post_QC.csv
+    +-- Run File_Merge.qmd (merge NPQ + metadata)
+    +-- Run Apply_Filters.qmd (apply QC filters)
     |
     v
-U19_Analysis/input_files/
+Metadata_Merge/output_files/filtered/
     |
-    +-- U19_Alamar_metadata.csv (from external source)
+    +-- filtered_combined_post_QC.csv
+    |
+    v
+U19_Analysis/input_files/ (copy or symlink)
     |
     v
 [1. Run Assoc_Analysis_univariate.Rmd]
@@ -117,6 +136,20 @@ U19_Analysis/input_files/
     |
     v
 U19_Analysis/output_files/
+```
+
+**Alternative (Legacy) Workflow:**
+```
+Primary_QC/output_files/ + External metadata
+    |
+    v
+U19_Analysis/input_files/
+    |
+    +-- NPQ_post_QC.csv
+    +-- U19_Alamar_metadata.csv
+    |
+    v
+[Scripts merge data internally]
 ```
 
 ## Analysis Notes
