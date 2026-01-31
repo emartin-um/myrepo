@@ -1,0 +1,537 @@
+---
+title: "Custom Association Tests"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+---
+
+# A. Overview
+
+Allows for flexible association tests with biomarkers as outcomes.
+
+---
+
+# B. Setup
+## B.1 Configuration
+```{r setup, message=FALSE, warning=FALSE, include=FALSE}
+library(tidyverse)
+library(broom)
+library(emmeans)
+library(car)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(gridExtra)
+library(janitor)
+library(car)
+library(effects)
+
+
+knitr::opts_chunk$set(echo = FALSE)
+
+# ===============================
+# STATISTICAL CONTRASTS
+# ===============================
+
+# Use sum-to-zero contrasts for Type III ANOVA
+# This ensures main effects test average effects across all factor levels
+# Critical when models include interactions
+options(contrasts = c("contr.sum", "contr.poly"))
+
+# Note: With treatment contrasts (R's default), Type III tests main effects
+# at the reference level only. Sum contrasts test population-averaged effects.
+
+# ============================================================================
+# CONFIGURATION - EDIT THESE SETTINGS
+# ============================================================================
+
+PRINT_TABLES = TRUE
+PRINT_PLOTS = TRUE
+
+# ===============================
+# HELPER FUNCTIONS
+# ===============================
+
+protect_name <- function(name) {
+  # Regex: Starts with a number OR contains any character NOT in [a-z, A-Z, 0-9, _, .]
+  # This will catch your dashes (-) specifically.
+  ifelse(grepl("^[0-9]|[^a-zA-Z0-9_.]", name), 
+         paste0("`", name, "`"), 
+         name)
+}
+
+is_variable <- function(data, var) {
+  if (!var %in% names(data)) return(FALSE)
+  n_unique <- length(unique(na.omit(data[[var]])))
+  return(n_unique > 1)
+}
+
+# Filter dataset based on various criteria
+filter_analysis_data <- function(data, 
+                                 sex_filter = NULL,           # "F", "M", or NULL for both
+                                 race_filter = NULL,          # Vector of races to KEEP
+                                 race_exclude = NULL,         # Vector of races to EXCLUDE
+                                 exclude_combinations = NULL, # List of combinations to exclude
+                                 min_age = NULL,              # Minimum age
+                                 max_age = NULL,              # Maximum age
+                                 cdx_filter = NULL) {         # Vector of CDX to keep
+  
+  filtered_data <- data
+  n_start <- nrow(filtered_data)
+  
+  cat("\n## Data Filtering\n\n")
+  cat("Starting N:", n_start, "\n\n")
+  
+  # Filter by sex
+  if (!is.null(sex_filter)) {
+    if ("sex" %in% names(filtered_data)) {
+      filtered_data <- filtered_data %>% filter(sex %in% sex_filter)
+      cat("After sex filter (keeping", paste(sex_filter, collapse=", "), "):", 
+          nrow(filtered_data), "(removed", n_start - nrow(filtered_data), ")\n")
+      n_start <- nrow(filtered_data)
+    } else {
+      cat("WARNING: sex variable not found\n")
+    }
+  }
+  
+  # Filter by race - keep only specified
+  if (!is.null(race_filter)) {
+    if ("Race_Ethnicity" %in% names(filtered_data)) {
+      filtered_data <- filtered_data %>% filter(Race_Ethnicity %in% race_filter)
+      cat("After race filter (keeping", paste(race_filter, collapse=", "), "):", 
+          nrow(filtered_data), "(removed", n_start - nrow(filtered_data), ")\n")
+      n_start <- nrow(filtered_data)
+    } else {
+      cat("WARNING: Race_Ethnicity variable not found\n")
+    }
+  }
+  
+  # Filter by race - exclude specified
+  if (!is.null(race_exclude)) {
+    if ("Race_Ethnicity" %in% names(filtered_data)) {
+      filtered_data <- filtered_data %>% filter(!Race_Ethnicity %in% race_exclude)
+      cat("After excluding races (", paste(race_exclude, collapse=", "), "):", 
+          nrow(filtered_data), "(removed", n_start - nrow(filtered_data), ")\n")
+      n_start <- nrow(filtered_data)
+    }
+  }
+  
+  # Exclude specific combinations (e.g., AFDC males)
+  if (!is.null(exclude_combinations)) {
+    for (combo in exclude_combinations) {
+      # combo should be a named list, e.g., list(Race_Ethnicity = "BL_AFDC", sex = "M")
+      filter_expr <- TRUE
+      combo_desc <- c()
+      
+      for (var_name in names(combo)) {
+        if (var_name %in% names(filtered_data)) {
+          filter_expr <- filter_expr & (filtered_data[[var_name]] == combo[[var_name]])
+          combo_desc <- c(combo_desc, paste(var_name, "=", combo[[var_name]]))
+        }
+      }
+      
+      n_excluded <- sum(filter_expr, na.rm = TRUE)
+      filtered_data <- filtered_data %>% filter(!filter_expr)
+      
+      cat("After excluding", paste(combo_desc, collapse=" & "), ":", 
+          nrow(filtered_data), "(removed", n_excluded, ")\n")
+    }
+    n_start <- nrow(filtered_data)
+  }
+  
+  # Filter by age
+  if (!is.null(min_age)) {
+    if ("age_at_sample" %in% names(filtered_data)) {
+      filtered_data <- filtered_data %>% filter(age_at_sample >= min_age)
+      cat("After min age filter (>=", min_age, "):", 
+          nrow(filtered_data), "(removed", n_start - nrow(filtered_data), ")\n")
+      n_start <- nrow(filtered_data)
+    }
+  }
+  
+  if (!is.null(max_age)) {
+    if ("age_at_sample" %in% names(filtered_data)) {
+      filtered_data <- filtered_data %>% filter(age_at_sample <= max_age)
+      cat("After max age filter (<=", max_age, "):", 
+          nrow(filtered_data), "(removed", n_start - nrow(filtered_data), ")\n")
+      n_start <- nrow(filtered_data)
+    }
+  }
+  
+  # Filter by CDX
+  if (!is.null(cdx_filter)) {
+    if ("CDX" %in% names(filtered_data)) {
+      filtered_data <- filtered_data %>% filter(CDX %in% cdx_filter)
+      cat("After CDX filter (keeping", paste(cdx_filter, collapse=", "), "):", 
+          nrow(filtered_data), "(removed", n_start - nrow(filtered_data), ")\n")
+      n_start <- nrow(filtered_data)
+    }
+  }
+  
+  # Re-level factors
+  if ("Race_Ethnicity" %in% names(filtered_data)) {
+    filtered_data <- filtered_data %>%
+      mutate(Race_Ethnicity = droplevels(Race_Ethnicity))
+  }
+  
+  if ("sex" %in% names(filtered_data)) {
+    filtered_data <- filtered_data %>%
+      mutate(sex = droplevels(sex))
+  }
+  
+  if ("CDX" %in% names(filtered_data)) {
+    filtered_data <- filtered_data %>%
+      mutate(CDX = droplevels(CDX))
+  }
+  
+  cat("\n**Final N:**", nrow(filtered_data), "\n\n")
+  
+  # Show final breakdown
+  if ("Race_Ethnicity" %in% names(filtered_data) && "sex" %in% names(filtered_data) && "CDX" %in% names(filtered_data)) {
+    cat("**Final sample sizes:**\n\n")
+    final_table <- filtered_data %>%
+      group_by(Race_Ethnicity, sex, CDX) %>%
+      summarise(n = n(), .groups = "drop") %>%
+      pivot_wider(names_from = CDX, values_from = n, values_fill = 0)
+    
+    print(kable(final_table))
+    cat("\n\n")
+  }
+  
+  cat("---\n\n")
+  
+  return(filtered_data)
+}
+
+
+build_formula <- function(response, predictors, interactions = NULL) {
+  rhs <- predictors
+  if (!is.null(interactions)) {
+    rhs <- c(rhs, interactions)
+  }
+  as.formula(paste(response, "~", paste(rhs, collapse = " + ")))
+}
+
+choose_model <- function(formula, df, response) {
+  y <- df[[response]]
+
+  if (!is.numeric(y)) {
+    stop("Response is not numeric")
+  }
+
+  lm(formula, data = df)
+}
+
+safe_fit <- function(formula, df, response) {
+  tryCatch(
+    choose_model(formula, df, response),
+    error = function(e) NULL
+  )
+}
+
+```
+
+## B.2 Load and Filter Data
+```{r load-and-filter-data}
+# Load data
+meta_plus_race_dx <- read_csv("./input_files/meta_plus_race_dx_mod.csv") 
+
+meta_plus_race_dx <-  meta_plus_race_dx %>%
+  mutate(
+    CDX = factor(CDX, levels = c("NCI", "MCI", "AD")),
+    Race_Ethnicity = factor(Race_Ethnicity, levels =  c("WH_HI", "MU_HI", "BL_AA", "BL_AFDC")),
+    sex = factor(sex, levels = c("F", "M"))
+  )
+
+
+# # OPTION 1: Females only
+# meta_plus_race_dx <- filter_analysis_data(
+#   meta_plus_race_dx,
+#   sex_filter = "F"
+# )
+#
+# #OPTION 2: Exclude AFDC and MU_HI
+# meta_plus_race_dx <- filter_analysis_data(
+#   meta_plus_race_dx,
+#   race_exclude = c("BL_AFDC", "MU_HI")
+# )
+# 
+# # OPTION 3: Exclude AFDC males specifically
+# meta_plus_race_dx <- filter_analysis_data(
+#   meta_plus_race_dx,
+#   exclude_combinations = list(
+#     list(Race_Ethnicity = "BL_AFDC", sex = "M")
+#   )
+# )
+# 
+# # OPTION 4: Multiple exclusions
+# meta_plus_race_dx <- filter_analysis_data(
+#   meta_plus_race_dx,
+#   exclude_combinations = list(
+#     list(Race_Ethnicity = "BL_AFDC", sex = "M"),
+#     list(Race_Ethnicity = "BL_AFDC", sex = "F", CDX = "MCI")  # Also exclude AFDC female MCIs
+#   )
+# )
+# 
+# # OPTION 5: Keep only certain races
+# meta_plus_race_dx <- filter_analysis_data(
+#   meta_plus_race_dx,
+#   race_filter = c("BL_NH", "WH_HI", "MU_HI")  # Exclude all AFDC
+# )
+# 
+# # OPTION 6: Age restriction
+# meta_plus_race_dx <- filter_analysis_data(
+#   meta_plus_race_dx,
+#   min_age = 50,
+#   max_age = 85
+# )
+# 
+# # OPTION 7: Combined filters
+# meta_plus_race_dx <- filter_analysis_data(
+#   meta_plus_race_dx,
+#   race_exclude = "BL_AFDC",
+#   min_age = 50,
+#   cdx_filter = c("NCI", "AD")  # Exclude MCI
+# )
+# 
+# # OPTION 8: No filtering - just show sample sizes
+# meta_plus_race_dx <- filter_analysis_data(meta_plus_race_dx)
+
+
+```
+
+
+# C. Analysis
+
+## C.1 Model
+
+```{r multi_response_modeling, message=FALSE, warning=FALSE, results= 'asis'}
+
+# ===============================
+# USER INPUT (EDIT THIS)
+# ===============================
+
+df <- meta_plus_race_dx   
+colnames(df) <- Vectorize(protect_name)(colnames(df))
+#response_vars <- names(df)[24:126]
+#response_vars <- names(df)[24:30]
+#response_vars <-c("CCL26", "FGF2", "IL15", "CD63","TIMP3", "CCL4","CCL2","CCL3","FABP3", "S100B", "IL18", "OligoSNCA", "IL7", "SNCA", "NRGN", "CD40LG","CHIT1", "PDGFRB", "MME", "CCL13", "PGF", "pSNCA129","CHI3L1")
+response_vars <-c("ACHE", "GFAP", "pTau181", "CD40LG", "VSNL1","CHI3L1", "IL15", "VCAM1", "TAFA5", "TARDBP")
+#response_vars <- read.csv("./biomarker_list.csv", stringsAsFactors = FALSE) |>pull(response)
+
+#main_effects <- c("CDX", "age_at_sample", "Race_Ethnicity")
+main_effects <- c("age_at_sample", "Race_Ethnicity","CDX", "sex")
+interactions=NULL
+interactions <- c("Race_Ethnicity:CDX")
+
+cat("\n **Main Effects:**", main_effects)
+cat("\n **Interactions:**", interactions)
+
+# ===============================
+# MODEL FITTING (PURRR)
+# ===============================
+
+results <- tibble(response = response_vars) %>%
+  mutate(
+    formula = map(response, build_formula,
+                  predictors = main_effects,
+                  interactions = interactions),
+    model = map2(formula, response, safe_fit, df = df),
+    failed = map_lgl(model, is.null)
+  )
+```
+
+## C.2 Tables
+
+```{r print_tables, message=FALSE, warning=FALSE, results= 'asis'}
+# ===============================
+# COEFFICIENT TABLE (COMBINED)
+# ===============================
+
+coef_table <- results %>%
+  filter(!failed) %>%
+  transmute(
+    response,
+    tidy = map(
+      model,
+      ~ tryCatch(
+          tidy(.x),
+          error = function(e) NULL
+        )
+    )
+  ) %>%
+  filter(!map_lgl(tidy, is.null)) %>%
+  unnest(tidy) %>%
+  mutate(
+    # Map sum contrast names back to interpretable labels
+    term = case_when(
+      term == "CDX1" ~ "CDX: NCI (vs avg)",
+      term == "CDX2" ~ "CDX: MCI (vs avg)", 
+      term == "CDX3" ~ "CDX: AD (vs avg)",
+      term == "Race_Ethnicity1" ~ "Race: BL_AA (vs avg)",
+      term == "Race_Ethnicity2" ~ "Race: BL_AFDC (vs avg)",
+      term == "Race_Ethnicity3" ~ "Race: WH_HI (vs avg)",
+      term == "Race_Ethnicity4" ~ "Race: MU_HI (vs avg)",
+      TRUE ~ term
+    )
+  ) %>%
+  mutate(
+    p_adj = p.adjust(p.value, method = "fdr")
+  )
+
+# ===============================
+# ANOVA TABLES (WHERE APPLICABLE)
+# ===============================
+
+
+anova_table <- results %>%
+  filter(!failed) %>%
+  transmute(
+    response,
+    # Use car::Anova with type = 3 to match regression logic
+    # Note: We use 'Anova' (capital A) from the car package
+    anova_obj = map(model, ~ tryCatch(car::Anova(.x, type = 3), error = function(e) NULL)),
+    tidy = map(anova_obj, tidy)
+  ) %>%
+  filter(!map_lgl(tidy, is.null)) %>%
+  unnest(tidy) %>%
+  # Remove the list-column object and the (Intercept) row which Type III includes
+  filter(term != "(Intercept)") %>% 
+  mutate(
+    p_adj = p.adjust(p.value, method = "fdr")
+  ) %>%
+  select(-anova_obj)
+
+if (PRINT_TABLES){
+  
+print (kable(
+  coef_table,
+  digits = 3,
+  caption = "Combined Model Coefficients (FDR-adjusted)"
+))
+  
+# if (nrow(anova_table) > 0) {
+#   print(knitr::kable(anova_table, digits = 3, caption = "Type III ANOVA Tables (FDR Adjusted)"))
+# }
+}
+
+# Filter for significant results from ANOVA table for a specified term
+
+SIG_FILTERS = c(main_effects,interactions)
+
+for (i in SIG_FILTERS) {
+  significant_results <- anova_table %>%
+    filter(
+      term == i, 
+      p_adj < 0.05
+    ) %>% 
+    arrange(p.value)
+
+  cat("\n\n### Summary for", i, "\n\n")
+
+  if (nrow(significant_results) > 0) {
+    print(kable(
+      significant_results,
+      digits = 3,
+      caption = paste("Significant Responses (FDR < 0.05) for", i)
+    ))
+  } else {
+    cat("No significant responses found for the term:", i, "\n")
+  }
+
+  # 2. Use 'i' (current iterator) instead of 'SIG_FILTERS' (entire vector)
+  write.csv(significant_results, paste0("significant_results_", i, ".csv"), row.names = FALSE)
+}
+
+```
+
+## C.3 Plots
+```{r print_plots, message=FALSE, warning=FALSE, results= 'asis'}
+# ===============================
+# DIAGNOSTICS
+# ===============================
+
+# for (i in seq_len(nrow(results))) {
+#   if (!results$failed[i]) {
+#     cat("\n### Diagnostics for", results$response[i], "\n")
+#     plot(results$model[[i]])
+#   }
+# }
+
+# ===============================
+# EFFECT PLOTS
+# ===============================
+
+if (PRINT_PLOTS){
+for (i in seq_len(nrow(results))) {
+  
+  if (!results$failed[i]) {
+    
+  cat("\n\n###", results$response[i], "\n\n")
+    # Extract all effects as a list
+effs <- allEffects(results$model[[i]])
+
+# Loop through each effect and check variable type
+for (name in names(effs)) {
+  # Check if the focal predictor is a factor
+  is_factor <- any(sapply(effs[[name]]$variables, function(x) x$is.factor))
+  
+  print(plot(
+    effs[[name]],
+    main = paste("Effects:", results$response[i]),
+    multiline = TRUE,
+    ci.style = if (is_factor) "bars" else "bands"
+  ))
+}
+
+    # plot(
+    #   allEffects(results$model[[i]]),
+    #   main = paste("Effects:", results$response[i]),
+    #   multiline = TRUE,
+    #   ci.style = "bars"  # Adds shaded confidence intervals
+    # )
+#library(ggeffects)
+# Replace allEffects with predict_response
+# eff_data <- predict_response(results$model[[i]], terms = main_effects)
+# print(plot(eff_data)) # Automatically includes beautiful confidence bands for multiline
+
+    for (v in main_effects) {
+  p <- ggplot(df, aes_string(x = v, y = results$response[i])) +
+    geom_point(alpha = 0.6) +
+    theme_bw()
+
+  if (is.factor(df[[v]])) {
+    p <- p + geom_boxplot(alpha = 0.5)
+  } else {
+    p <- p + geom_smooth(method = "lm", se = TRUE)
+  }
+
+  print(p)
+}
+}
+}
+}
+```
+
+```{r End, message=FALSE, warning=FALSE}
+
+# ===============================
+# FAILURE REPORTING
+# ===============================
+
+failed_responses <- results %>%
+  filter(failed) %>%
+  pull(response)
+
+if (length(failed_responses) > 0) {
+  cat(
+    "\n⚠️ Models failed for:",
+    paste(failed_responses, collapse = ", "),
+    "\n"
+  )
+}
+```
