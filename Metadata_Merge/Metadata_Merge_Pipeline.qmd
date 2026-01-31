@@ -51,6 +51,7 @@ This pipeline merges post-QC biomarker data with sample metadata and applies exc
 2.  **Merge Data** - Merge biomarker data with metadata
 3.  **Quality Control** - Identify duplicates, implausible values, and issues
 4.  **Apply Filters** - Create final analysis-ready datasets
+5.  **Add Derived Biomarkers** - Create APOE4_minus_APOE and ABeta42_minus_ABeta40 columns
 
 ```{r}
 #| label: mode-display
@@ -588,6 +589,90 @@ cat("|---------|--------|-------|----------|\n")
 cat("| Standard | ", nrow(merged_standard), " | ", nrow(filtered_standard), " | ", nrow(merged_standard) - nrow(filtered_standard), " |\n", sep = "")
 cat("| Low | ", nrow(merged_low), " | ", nrow(filtered_low), " | ", nrow(merged_low) - nrow(filtered_low), " |\n", sep = "")
 cat("| Combined | ", nrow(merged_combined), " | ", nrow(filtered_combined), " | ", nrow(merged_combined) - nrow(filtered_combined), " |\n", sep = "")
+```
+
+# Step 6: Add Derived Biomarkers {#step6}
+
+```{r}
+#| label: step6-derived-biomarkers
+#| echo: false
+#| results: asis
+
+cat("## Creating Derived Biomarker Columns\n\n")
+
+# Check that required columns exist
+required_cols <- c("APOE", "APOE4", "A_40", "A_42")
+missing_combined <- required_cols[!required_cols %in% names(filtered_combined)]
+missing_standard <- required_cols[!required_cols %in% names(filtered_standard)]
+
+if (length(missing_combined) > 0 || length(missing_standard) > 0) {
+  cat("::: {.callout-warning}\n")
+  cat("### Missing Source Columns\n\n")
+  if (length(missing_combined) > 0) {
+    cat("Missing in filtered_combined: ", paste(missing_combined, collapse = ", "), "\n")
+  }
+  if (length(missing_standard) > 0) {
+    cat("Missing in filtered_standard: ", paste(missing_standard, collapse = ", "), "\n")
+  }
+  cat(":::\n\n")
+} else {
+  # Add derived columns to filtered_combined
+  filtered_combined <- filtered_combined %>%
+    mutate(
+      APOE4_minus_APOE = APOE4 - APOE,
+      ABeta42_minus_ABeta40 = A_42 - A_40
+    )
+
+  # Add derived columns to filtered_standard
+  filtered_standard <- filtered_standard %>%
+    mutate(
+      APOE4_minus_APOE = APOE4 - APOE,
+      ABeta42_minus_ABeta40 = A_42 - A_40
+    )
+
+  cat("Added two derived biomarker columns:\n\n")
+  cat("| Derived Biomarker | Formula |\n")
+  cat("|-------------------|--------|\n")
+  cat("| `APOE4_minus_APOE` | APOE4 - APOE |\n")
+  cat("| `ABeta42_minus_ABeta40` | A_42 - A_40 |\n\n")
+
+  # Overwrite filtered files with new columns
+  write_csv(filtered_standard, file.path(OUTPUT_DIR, "filtered", "filtered_standard_post_QC.csv"))
+  write_csv(filtered_combined, file.path(OUTPUT_DIR, "filtered", "filtered_combined_post_QC.csv"))
+
+  cat("Filtered files updated with derived biomarkers.\n\n")
+
+  # Summary statistics for derived biomarkers
+  cat("### Summary Statistics\n\n")
+
+  apoe_stats <- filtered_combined %>%
+    summarise(
+      N = sum(!is.na(APOE4_minus_APOE)),
+      Mean = round(mean(APOE4_minus_APOE, na.rm = TRUE), 3),
+      SD = round(sd(APOE4_minus_APOE, na.rm = TRUE), 3),
+      Min = round(min(APOE4_minus_APOE, na.rm = TRUE), 3),
+      Median = round(median(APOE4_minus_APOE, na.rm = TRUE), 3),
+      Max = round(max(APOE4_minus_APOE, na.rm = TRUE), 3)
+    ) %>%
+    mutate(Biomarker = "APOE4_minus_APOE", .before = 1)
+
+  abeta_stats <- filtered_combined %>%
+    summarise(
+      N = sum(!is.na(ABeta42_minus_ABeta40)),
+      Mean = round(mean(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
+      SD = round(sd(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
+      Min = round(min(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
+      Median = round(median(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
+      Max = round(max(ABeta42_minus_ABeta40, na.rm = TRUE), 3)
+    ) %>%
+    mutate(Biomarker = "ABeta42_minus_ABeta40", .before = 1)
+
+  derived_stats <- bind_rows(apoe_stats, abeta_stats)
+
+  kable(derived_stats, caption = "Derived Biomarker Summary Statistics") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    print()
+}
 ```
 
 # Output Files {#output}

@@ -7,12 +7,14 @@ R code for quality control and analysis of Alamar biomarker data for the U19 Alz
 ```
 ├── Primary_QC/           # Primary quality control analyses
 ├── Metadata_Merge/       # Merge biomarker data with metadata
-├── Replicate_Analysis/   # Replicate sample concordance and CV analysis
-├── Hemolysis_Check/      # Hemolysis marker analysis by site
+├── Secondary_QC/         # Secondary QC analyses
+│   ├── Replicate_Analysis/   # Replicate sample concordance and CV analysis
+│   └── Hemolysis_Check/      # Hemolysis marker analysis by site
 ├── U19_Analysis/         # U19 grant-specific association analyses
-├── Clustering/           # PCA and clustering analyses
 └── Utilities/            # Shared functions and helper scripts
 ```
+
+> **Note:** The `Clustering/` folder (PCA and clustering analyses) is under active development and available on the `clustering-dev` branch.
 
 ## Projects
 
@@ -32,15 +34,19 @@ Merges post-QC biomarker data with sample metadata. Identifies and handles dupli
 
 Open `Metadata_Merge/Metadata_Merge.Rproj` in RStudio and render the qmd file.
 
-### Replicate_Analysis
+### Secondary_QC
+
+Secondary quality control analyses organized in subfolders.
+
+#### Replicate_Analysis
 Analysis of replicate samples for assessing assay reproducibility and concordance.
 
 **Scripts:**
 - `QC_Pipeline_Replicates.Rmd` - CV analysis and replicate concordance
 
-Open `Replicate_Analysis/Replicate_Analysis.Rproj` in RStudio. Input files are auto-copied from Primary_QC if not present.
+Open `Secondary_QC/Replicate_Analysis/Replicate_Analysis.Rproj` in RStudio. Input files are auto-copied from Primary_QC if not present.
 
-### Hemolysis_Check
+#### Hemolysis_Check
 Analysis of hemolysis markers (HBA1, PGK1, MDH1, SOD1, ENO2) to identify pre-analytical sample handling issues vs biological hemolysis effects.
 
 **Scripts:**
@@ -51,7 +57,7 @@ Analysis of hemolysis markers (HBA1, PGK1, MDH1, SOD1, ENO2) to identify pre-ana
   - Outlier detection
   - Technical replicate baseline variance comparison
 
-Open `Hemolysis_Check/Hemolysis_Check.Rproj` in RStudio. Data auto-loads from Metadata_Merge output if not in input_files/.
+Open `Secondary_QC/Hemolysis_Check/Hemolysis_Check.Rproj` in RStudio. Data auto-loads from Metadata_Merge output if not in input_files/.
 
 ### U19_Analysis
 Statistical analyses specific to the U19 grant objectives, including CDX associations and interaction testing.
@@ -61,14 +67,6 @@ Statistical analyses specific to the U19 grant objectives, including CDX associa
 - `Assoc_Analysis_Interaction_HighBiomarkers_12_31_25_1.Rmd` - CDX interaction analyses
 
 Open `U19_Analysis/U19_Analysis.Rproj` in RStudio.
-
-### Clustering
-PCA and clustering analyses for dimensionality reduction, metadata associations, and outlier detection.
-
-**Scripts:**
-- `biomarker_pca_analysis.Rmd` - Comprehensive PCA with metadata association testing
-
-Open `Clustering/Clustering.Rproj` in RStudio.
 
 ### Utilities
 Shared R functions used across projects.
@@ -84,13 +82,13 @@ The recommended analysis order is:
 1. Primary_QC
    └── Produces: NPQ_post_QC.csv, biomarker/sample summaries
    │
-   ├── 2a. Replicate_Analysis (optional, can run after Primary_QC)
+   ├── 2a. Secondary_QC/Replicate_Analysis (optional, can run after Primary_QC)
    │       └── Produces: CV statistics, concordance reports
    │
    └── 2b. Metadata_Merge
            └── Produces: merged datasets, exclusion report, filtered analysis-ready data
 
-3. Hemolysis_Check (optional, recommended before association analyses)
+3. Secondary_QC/Hemolysis_Check (optional, recommended before association analyses)
    └── Produces: hemolysis index, outlier flags, biomarker hemolysis assessment
 
 4. U19_Analysis
@@ -98,10 +96,9 @@ The recommended analysis order is:
       └── Produces: biomarker_groups.csv, meta_plus_race_dx.csv
    b. Interaction analysis second
       └── Produces: association results, interaction plots
-
-5. Clustering (optional, for exploratory analysis)
-   └── Produces: PCA scores, loadings, metadata associations, outliers
 ```
+
+> **Clustering analyses** (PCA, outlier detection) are under development on the `clustering-dev` branch.
 
 ## Getting Started
 
@@ -136,7 +133,6 @@ install.packages(c(
   "tidyr",
   "purrr",
 
-
   # Statistical analysis
   "broom",
   "emmeans",
@@ -155,33 +151,25 @@ install.packages(c(
 
   # Other utilities
   "poibin",
-  "irlba",
-
-  # PCA/Clustering
-  "FactoMineR",
-  "factoextra",
-  "scales"
+  "irlba"
 ))
 ```
 
 ### Package Summary by Project
 
-| Package | Primary_QC | Replicate | U19 | Clustering | Description |
-|---------|:----------:|:---------:|:---:|:----------:|-------------|
-| tidyverse | x | x | x | x | Core data manipulation |
-| pheatmap | x | | x | | Heatmap visualization |
-| caret | x | | x | | ML utilities (for clustering) |
-| kableExtra | x | x | x | x | HTML table formatting |
-| emmeans | | | x | | Estimated marginal means |
-| car | | | x | | Type II ANOVA |
-| broom | | | x | | Model tidying |
-| patchwork | | x | x | | Plot composition |
-| gridExtra | | | x | x | Arrange multiple plots |
-| poibin | x | | | | Poisson binomial distribution |
-| irlba | x | | | | Fast SVD/PCA |
-| FactoMineR | | | | x | PCA analysis |
-| factoextra | | | | x | PCA visualization |
-| scales | | | | x | Plot formatting |
+| Package | Primary_QC | Secondary_QC | U19 | Description |
+|---------|:----------:|:------------:|:---:|-------------|
+| tidyverse | x | x | x | Core data manipulation |
+| pheatmap | x | | x | Heatmap visualization |
+| caret | x | | x | ML utilities |
+| kableExtra | x | x | x | HTML table formatting |
+| emmeans | | | x | Estimated marginal means |
+| car | | | x | Type II ANOVA |
+| broom | | | x | Model tidying |
+| patchwork | | x | x | Plot composition |
+| gridExtra | | | x | Arrange multiple plots |
+| poibin | x | | | Poisson binomial distribution |
+| irlba | x | | | Fast SVD/PCA |
 
 ## Using Shared Functions
 
